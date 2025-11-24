@@ -6,6 +6,11 @@ from matplotlib.patches import Patch, Rectangle
 from matplotlib.collections import LineCollection, PatchCollection
 import matplotlib.cm as cm
 
+plt.rcParams.update({
+    "text.usetex": True,
+    "font.family": "Helvetica"
+})
+
 import numpy as np
 import pandas as pd
 
@@ -19,24 +24,24 @@ def plot_input(results: efes_dc.Results, final_callback=None, show=True):
 
     # plot power generation
     y = np.array([*results.analysis_results.data_input.power_generation, results.analysis_results.data_input.power_generation[-1]])
-    axs[0].step(x=time, y=y, where='post', color='green', label='$\mathit{P}_{\mathrm{gen}}$')
+    axs[0].step(x=time, y=y, where='post', color='green', label=r'$\mathit{P}_{\mathrm{gen}}$')
     axs[0].fill_between(x=time, y1=y, step='post',
                         facecolor='green', alpha=0.2,
-                        label='$\mathit{E}_{\mathrm{gen}}=$' + efes.pretty_print(results.analysis_results.energy_generation, 'Wh', decimals=0)
+                        label=r'$\mathit{E}_{\mathrm{gen}}=$' + efes.pretty_print(results.analysis_results.energy_generation, 'Wh', decimals=0)
                         )
 
     # plot power used generation
     y = np.array([*results.analysis_results.data_input.power_used_generation, results.analysis_results.data_input.power_used_generation[-1]])
     axs[0].fill_between(x=time, y1=y, step='post',
                         facecolor='white', hatch='//////', alpha=0.2,
-                        label='$\mathit{E}_{\mathrm{ugen}}=$' + efes.pretty_print( results.analysis_results.energy_used_generation, 'Wh', decimals=0)
+                        label=r'$\mathit{E}_{\mathrm{ugen}}=$' + efes.pretty_print( results.analysis_results.energy_used_generation, 'Wh', decimals=0)
                         )
 
     # add legend with additional information on self-consumption
     lgd = axs[0].legend(bbox_to_anchor=(1.0, 1.0))
     handles, labels = axs[0].get_legend_handles_labels()
     handles.append(Patch(facecolor='w', edgecolor='w'))
-    labels.append('$\psi_{\mathrm{sc}}=$' + f'{results.analysis_results.self_consumption_initial:.2f}')
+    labels.append(r'$\psi_{\mathrm{sc}}=$' + f'{results.analysis_results.self_consumption_initial:.2f}')
     lgd._legend_box = None
     lgd._init_legend_box(handles, labels)
     lgd._set_loc(lgd._loc)
@@ -44,24 +49,24 @@ def plot_input(results: efes_dc.Results, final_callback=None, show=True):
 
     # plot power demand
     y = np.array([*results.analysis_results.data_input.power_demand, results.analysis_results.data_input.power_demand[-1]])
-    axs[1].step(x=time, y=y, where='post', color='red', label='$\mathit{P}_{\mathrm{dem}}$')
+    axs[1].step(x=time, y=y, where='post', color='red', label=r'$\mathit{P}_{\mathrm{dem}}$')
     axs[1].fill_between(x=time, y1=y, step='post',
                         facecolor='red', alpha=0.2,
-                        label='$\mathit{E}_{\mathrm{dem}}=$' + efes.pretty_print(results.analysis_results.energy_demand, 'Wh', decimals=0)
+                        label=r'$\mathit{E}_{\mathrm{dem}}=$' + efes.pretty_print(results.analysis_results.energy_demand, 'Wh', decimals=0)
                         )
 
     # plot power covered demand
     y = np.array([*results.analysis_results.data_input.power_covered_demand, results.analysis_results.data_input.power_covered_demand[-1]])
     axs[1].fill_between(x=time, y1=y, step='post',
                         facecolor='white', hatch='//////', alpha=0.2,
-                        label='$\mathit{E}_{\mathrm{cdem}}=$' + efes.pretty_print( results.analysis_results.energy_covered_demand, 'Wh', decimals=0)
+                        label=r'$\mathit{E}_{\mathrm{cdem}}=$' + efes.pretty_print( results.analysis_results.energy_covered_demand, 'Wh', decimals=0)
                         )
 
     # add legend with additional information on self-sufficiency
     lgd = axs[1].legend(bbox_to_anchor=(1.0, 1.0))
     handles, labels = axs[1].get_legend_handles_labels()
     handles.append(Patch(facecolor='w', edgecolor='w'))
-    labels.append('$\psi_{\mathrm{ss}}=$' + f'{results.analysis_results.self_sufficiency_initial:.2f}')
+    labels.append(r'$\psi_{\mathrm{ss}}=$' + f'{results.analysis_results.self_sufficiency_initial:.2f}')
     lgd._legend_box = None
     lgd._init_legend_box(handles, labels)
     lgd._set_loc(lgd._loc)
@@ -69,26 +74,26 @@ def plot_input(results: efes_dc.Results, final_callback=None, show=True):
 
     # plot power residual generation
     y = np.array([*results.analysis_results.data_input.power_residual_generation, results.analysis_results.data_input.power_residual_generation[-1]])
-    axs[2].step(x=time, y=y, where='post', color='black', label='$\mathit{P}_{\mathrm{rgen}}$')
+    axs[2].step(x=time, y=y, where='post', color='black', label=r'$\mathit{P}_{\mathrm{rgen}}$')
 
     # plot power excess and deficit
     power_excess_initial = np.clip(y, a_min=0, a_max=np.inf)
     axs[2].fill_between(x=time, y1=power_excess_initial, step='post',
                         color='green', alpha=0.2,
-                        label='$\mathit{E}_{\mathrm{exs}}=$' + efes.pretty_print(power_excess_initial[:-1].sum() * results.analysis_results.data_input.delta_time_step, 'Wh', decimals=0)
+                        label=r'$\mathit{E}_{\mathrm{exs}}=$' + efes.pretty_print(power_excess_initial[:-1].sum() * results.analysis_results.data_input.delta_time_step, 'Wh', decimals=0)
                         )
     power_deficit_initial = np.clip(y, a_min=-np.inf, a_max=0)
     axs[2].fill_between(x=time, y1=power_deficit_initial, step='post', color='red', alpha=0.2,
-                        label='$\mathit{E}_{\mathrm{def}}=$' + efes.pretty_print(-power_deficit_initial[:-1].sum() * results.analysis_results.data_input.delta_time_step, 'Wh', decimals=0)
+                        label=r'$\mathit{E}_{\mathrm{def}}=$' + efes.pretty_print(-power_deficit_initial[:-1].sum() * results.analysis_results.data_input.delta_time_step, 'Wh', decimals=0)
                         )
 
    # add legend with additional information on maxmimum self-consumption and self-sufficiency
     lgd = axs[2].legend(bbox_to_anchor=(1.0, 1.0))
     handles, labels = axs[2].get_legend_handles_labels()
     handles.append(Patch(facecolor='w', edgecolor='w'))
-    labels.append('$\psi_{\mathrm{sc,max}}=$' + f'{results.analysis_results.self_consumption_max:.2f}')
+    labels.append(r'$\psi_{\mathrm{sc,max}}=$' + f'{results.analysis_results.self_consumption_max:.2f}')
     handles.append(Patch(facecolor='w', edgecolor='w'))
-    labels.append('$\psi_{\mathrm{ss,max}}=$' + f'{results.analysis_results.self_sufficiency_max:.2f}')
+    labels.append(r'$\psi_{\mathrm{ss,max}}=$' + f'{results.analysis_results.self_sufficiency_max:.2f}')
     lgd._legend_box = None
     lgd._init_legend_box(handles, labels)
     lgd._set_loc(lgd._loc)
@@ -209,7 +214,7 @@ def add_effectiveness_plot_to_axes(ax, results:efes_dc.Results, query_results:ef
         query_results = run_query_for_continuous_plots(results, capacity_min, capacity_max)
 
     if not use_fill:
-        ax.plot(query_results.capacity, query_results.effectiveness, label='effectiveness $\mu$', **kwargs)
+        ax.plot(query_results.capacity, query_results.effectiveness, label=r'effectiveness $\mu$', **kwargs)
     else:
         ax.fill_between(query_results.capacity, query_results.effectiveness, y2=0, **kwargs)
 
@@ -220,7 +225,7 @@ def add_gain_plot_to_axes(ax, results:efes_dc.Results, query_results:efes_dc.Que
         query_results = run_query_for_continuous_plots(results, capacity_min, capacity_max)
 
     if not use_fill:
-        ax.plot(query_results.capacity, query_results.gain, label='gain $\mathit{G}$', **kwargs)
+        ax.plot(query_results.capacity, query_results.gain, label=r'gain $\mathit{G}$', **kwargs)
     else:
         ax.fill_between(query_results.capacity, query_results.gain, y2=0, **kwargs)
 
@@ -231,7 +236,7 @@ def add_gain_per_day_plot_to_axes(ax, results:efes_dc.Results, query_results:efe
         query_results = run_query_for_continuous_plots(results, capacity_min, capacity_max)
 
     if not use_fill:
-        ax.plot(query_results.capacity, query_results.gain_per_day, label='gain $\mathit{G}_{\mathrm{day}}$', **kwargs)
+        ax.plot(query_results.capacity, query_results.gain_per_day, label=r'gain $\mathit{G}_{\mathrm{day}}$', **kwargs)
     else:
         ax.fill_between(query_results.capacity, query_results.gain_per_day, y2=0, **kwargs)
     return query_results
@@ -240,7 +245,7 @@ def add_local_effectiveness_plot_to_axes(ax, results:efes_dc.Results, use_fill=F
     x = results.analysis_results.capacity
     x = np.append(x, x[-1] * 100)
     if not use_fill:
-        ax.step(x, [*results.analysis_results.effectiveness_local, 0], where='post', label='local effectiveness $\mathit{m}$', **kwargs)
+        ax.step(x, [*results.analysis_results.effectiveness_local, 0], where='post', label=r'local effectiveness $\mathit{m}$', **kwargs)
     else:
         ax.fill_between(x, [*results.analysis_results.effectiveness_local, 0], y2=0, step='post', **kwargs)
 
@@ -443,7 +448,7 @@ def plot_results(results: efes_dc.Results,
 
 
     axs[0].grid()
-    axs[0].set(ylabel='$\mathit{E}^{+}$ [Wh]', ylim=ylims[0])
+    axs[0].set(ylabel=r'$\mathit{E}^{+}$ [Wh]', ylim=ylims[0])
 
     if add_gain_plot:
         query_result = add_effectiveness_plot_to_axes(axs[1], results, **query_kwargs)
@@ -454,9 +459,9 @@ def plot_results(results: efes_dc.Results,
         axs[1].legend()
 
         axs[1].grid()
-        axs[1].set(ylabel='$\mathit{G}$, $\mu$ and $\mathit{m}$ [1]', ylim=ylims[1])
+        axs[1].set(ylabel=r'$\mathit{G}$, $\mu$ and $\mathit{m}$ [1]', ylim=ylims[1])
 
-    axs[-1].set(xlabel='$C$ [Wh]', xlim=xlim)
+    axs[-1].set(xlabel=r'$C$ [Wh]', xlim=xlim)
     fig.tight_layout()
 
     if final_callback is not None:
@@ -560,7 +565,7 @@ def create_variation_plot(parameter_study_results: efes_dc.ParameterStudyResults
         row = 1
         if add_local_effectiveness_plot:
             add_local_effectiveness_plot_to_axes(axs[row], reference_result, color='black')
-            axs[row].set(ylabel='$\mathit{m}$ [1]')
+            axs[row].set(ylabel=r'$\mathit{m}$ [1]')
             if ylims[row] is None:
                 ylims[row] = [0, 1.2*query_results_limits.effectiveness_local.max()]
 
@@ -578,7 +583,7 @@ def create_variation_plot(parameter_study_results: efes_dc.ParameterStudyResults
             ylims[row] = [0, 1.2*query_results_limits.effectiveness.max()]
 
         axs[row].set(ylim=ylims[row])
-        axs[row].set(ylabel='$\mu$ [1]')
+        axs[row].set(ylabel=r'$\mu$ [1]')
         axs[row].grid()
 
         axes_x = 1.01
@@ -596,7 +601,7 @@ def create_variation_plot(parameter_study_results: efes_dc.ParameterStudyResults
                                primary_to_secondary_func=primary_to_secondary_func,
                                secondary_to_primary_func=secondary_to_primary_func,
                                axes_x=axes_x,
-                               axes_title='$\mathit{G}$',
+                               axes_title=r'$\mathit{G}$',
                                )
 
             axes_x = axes_x + 0.06
@@ -616,7 +621,7 @@ def create_variation_plot(parameter_study_results: efes_dc.ParameterStudyResults
                                primary_to_secondary_func=primary_to_secondary_func,
                                secondary_to_primary_func=secondary_to_primary_func,
                                axes_x=axes_x,
-                               axes_title='$\mathit{G}_{\mathrm{day}}$',
+                               axes_title=r'$\mathit{G}_{\mathrm{day}}$',
                                )
 
         axs[-1].set(xlabel=xlabel)
