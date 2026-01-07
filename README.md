@@ -3,7 +3,8 @@
 [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/AirborneKiwi/effective_energy_shift.git/HEAD?labpath=demo_notebook.ipynb)
 
 This repository contains the code for the Effective Energy Shift (EfES) algorithm. 
-The algorithm is described in "Effective Energy Shift algorithm for Electric Energy Storage analysis" by J. Fellerer, D. Scharrer, and R. German, submitted to Applied Energy, 2024.
+The algorithm is described in ["The Effective Energy Shift (EfES) algorithm: A non-iterative piece-wise linear method for mapping storage capacity to self-sufficiency and self-consumption" by J. Fellerer, D. Scharrer, and R. German, published in Applied Energy, 2026](https://doi.org/10.1016/j.apenergy.2025.127241).
+Please cite the publication according to your guidelines, when utilizing the code from this repo.
 
 It is implemented in Python and an interactive demonstration of the algorithm can be run in the cloud using Binder by clicking on the "launch binder" badge above.
 
