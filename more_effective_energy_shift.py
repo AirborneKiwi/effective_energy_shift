@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import random
 from functools import wraps
 
 from enum import IntEnum, Enum, auto
@@ -8,6 +10,7 @@ from os import times_result
 
 from typing import Deque, List, Set, Dict, Tuple, Iterable
 from typing import Callable, TypeVar, ParamSpec, cast
+from warnings import deprecated
 
 
 class PacketType(IntEnum):
@@ -33,17 +36,32 @@ R = TypeVar("R")
 
 # Toggle at import-time / runtime.
 CHECK_INVARIANTS = True
-DEBUG_LOG = True
-
+DEBUG_LOG = False
+REC_EVTS = True
 
 class EventType(Enum):
+    APPEND_EXCESS = auto(),
+    APPEND_DEFICIT = auto(),
+    APPEND_BALANCED = auto(),
+
+    APPEND_LEFT_EXCESS = auto(),
+    APPEND_LEFT_DEFICIT = auto(),
+    APPEND_LEFT_BALANCED = auto(),
+
+    POP_EXCESS = auto(),
+    POP_DEFICIT = auto(),
+    POP_BALANCED = auto(),
+
+    POP_LEFT_EXCESS = auto(),
+    POP_LEFT_DEFICIT = auto(),
+    POP_LEFT_BALANCED = auto(),
 
     NEXT_ITERATION = auto(),
 
     BALANCE_STEP = auto(),
 
+    BALANCE_GROUP = auto(),
     BALANCE_OBSOLETE = auto(),
-    BALANCING_GROUP = auto(),
 
     EXCESS_BELOW_DEFICIT = auto(),
     DEFICIT_BELOW_EXCESS = auto(),
@@ -53,17 +71,17 @@ class EventType(Enum):
     BALANCED_PHASE = auto(),
 
     BALANCED_ABSORBED_AT_TOP = auto(),
-    BALANCED_ABSORBED_AT_BOTTOM = auto(),
+    BALANCED_ABSORBED_AT_FRONT = auto(),
     BALANCED_HOVERS_AT_TOP = auto(),
     BALANCED_HOVERS_AT_BOTTOM = auto(),
 
     EXCESS_ABSORBED_AT_TOP = auto(),
-    EXCESS_ABSORBED_AT_BOTTOM = auto(),
+    EXCESS_ABSORBED_AT_FONT = auto(),
     EXCESS_HOVERS_AT_TOP = auto(),
     EXCESS_HOVERS_AT_BOTTOM = auto(),
 
     DEFICIT_ABSORBED_AT_TOP = auto(),
-    DEFICIT_ABSORBED_AT_BOTTOM = auto(),
+    DEFICIT_ABSORBED_AT_FRONT = auto(),
     DEFICIT_HOVERS_AT_TOP = auto(),
     DEFICIT_HOVERS_AT_BOTTOM = auto(),
 
@@ -75,12 +93,13 @@ class EventType(Enum):
 
     SHIFT_STEP = auto(),
 
-    SHIFTING_GROUP = auto(),
-    SHIFT_OBSOLETE = auto(),
-    SHIFT_EXCESS_PACKET = auto(),
-    SHIFT_DEFICIT_PACKET = auto(),
-    EXCESS_JUMPS_HURDLE = auto(),
-    DEFICIT_JUMPS_HURDLE = auto(),
+    SHIFT_GROUP = auto(),
+    SHIFT_GROUP_OBSOLETE = auto(),
+
+    SHIFT_PACKET_EXCESS = auto(),
+    SHIFT_PACKET_DEFICIT = auto(),
+    HURDLE_JUMP_BY_EXCESS = auto(),
+    HURDLE_JUMP_BY_DEFICIT = auto(),
 
     MERGE_STEP = auto(),
 
@@ -117,7 +136,14 @@ class EventRecorder:
         if getattr(self, "_initialized", False):
             return
         self._initialized = True
-        self.observed_events: Dict[EventType, List[Event]] = {evt_type.name: [] for evt_type in EventType}
+        self.observed_events: Dict[str, List[Event]] = {evt_type.name: [] for evt_type in EventType}
+        self.observed_events_in_order: List[Event] = []
+        self.n_observed_events: int = 0
+
+
+    def reset(self):
+        self.observed_events: Dict[str, List[Event]] = {evt_type.name: [] for evt_type in EventType}
+        self.observed_events_in_order: List[Event] = []
         self.n_observed_events: int = 0
 
 
@@ -132,11 +158,30 @@ class EventRecorder:
         self.observed_events[event.evt_type].append(event)
         self.n_observed_events += 1
 
+        self.observed_events_in_order.append(event)
 
-    def __str__(self):
+        if DEBUG_LOG:
+            print(f'Event {event.evt_type} triggered by {event.triggered_by}')
+
+
+    def print_events(self, group_by_type:bool=True, show_all=False, print_trace:bool=False):
+        return self.__str__(group_by_type=group_by_type, show_all=show_all, print_trace=print_trace)
+
+
+    def __str__(self, group_by_type:bool=True, show_all=False, print_trace:bool=False):
         s = ''
-        for event_type, events in self.observed_events.items():
-            s += f'{event_type}: {len(events)}\n'
+        if group_by_type:
+            for event_type, events in self.observed_events.items():
+                if len(events) > 0 or show_all:
+                    s += f'{len(events)} x {event_type} by {[event.triggered_by for event in events]} \n'
+            s += '\n---------------------------\n'
+
+        # print in id order
+        if print_trace:
+            for event in self.observed_events_in_order:
+                s += f'{event.evt_type} by {event.triggered_by} \n'
+
+            s += '\n---------------------------\n'
         return s
 
 
@@ -173,7 +218,6 @@ class PhasePair:
     index_phase: int
 
     energy_packets: Dict[PacketType, Deque[EnergyPacket]] = field(default_factory=lambda: {tp: deque() for tp in [PacketType.EXCESS, PacketType.DEFICIT, PacketType.BALANCED]})
-    n_packets: Dict[PacketType, int] = field(default_factory = lambda: {tp: 0 for tp in [PacketType.EXCESS, PacketType.DEFICIT, PacketType.BALANCED]})
 
     energy_excess_initial: InitVar[float | None] = None
     energy_deficit_initial: InitVar[float | None] = None
@@ -201,9 +245,47 @@ class PhasePair:
         DEBUG_LOG = _tmp_debug_log
 
 
+    @property
+    def n_packets(self):
+        @dataclass(frozen=True)
+        class nPackets:
+            n_packets_excess: int
+            n_packets_deficit: int
+            n_packets_balanced: int
+
+            def __getitem__(self, item) -> int:
+                match item:
+                    case PacketType.EXCESS:
+                        return self.n_packets_excess
+                    case PacketType.DEFICIT:
+                        return self.n_packets_deficit
+                    case PacketType.BALANCED:
+                        return self.n_packets_balanced
+
+                return 0
+
+        return nPackets(
+            n_packets_excess = self.n_packets_excess,
+            n_packets_deficit = self.n_packets_deficit,
+            n_packets_balanced = self.n_packets_balanced
+        )
+
+    @property
+    def n_packets_excess(self):
+        return len(self.energy_packets[PacketType.EXCESS])
+
+    @property
+    def n_packets_deficit(self):
+        return len(self.energy_packets[PacketType.DEFICIT])
+
+    @property
+    def n_packets_balanced(self):
+        return len(self.energy_packets[PacketType.BALANCED])
+
+
     def _check_invariants(self):
         for tp in (PacketType.EXCESS, PacketType.DEFICIT, PacketType.BALANCED):
-            assert self.n_packets[tp] == len(self.energy_packets[tp])
+
             dq = self.energy_packets[tp]
             for a, b in zip(dq, list(dq)[1:]):
                 assert a.capacity_max <= b.capacity + EPS
@@ -227,24 +309,24 @@ class PhasePair:
 
     @property
     def phase_type(self):
-        if self.n_packets[PacketType.EXCESS] == 0 and self.n_packets[PacketType.DEFICIT] == 0:
+        if self.n_packets_excess == 0 and self.n_packets_deficit == 0:
             return PacketType.BALANCED
 
-        if self.n_packets[PacketType.EXCESS] >= 1 and self.n_packets[PacketType.DEFICIT] >= 1:
+        if self.n_packets_excess >= 1 and self.n_packets_deficit >= 1:
             return PacketType.UNDEFINED
 
-        if self.n_packets[PacketType.EXCESS] >= 1:
+        if self.n_packets_excess >= 1:
             return PacketType.EXCESS
 
-        if self.n_packets[PacketType.DEFICIT] >= 1:
+        if self.n_packets_deficit >= 1:
             return PacketType.DEFICIT
 
-        raise
+        raise ValueError(f'PhaseType cannot be resolved!')
 
 
     @property
     def N_unbalanced_total(self) -> int:
-        return self.n_packets[PacketType.EXCESS] + self.n_packets[PacketType.DEFICIT]
+        return self.n_packets_excess + self.n_packets_deficit
 
 
     def _absorb_front_overlaps(self, packet_type: PacketType, pkt: EnergyPacket) -> EnergyPacket:
@@ -256,21 +338,23 @@ class PhasePair:
 
         while dq and pkt.capacity_max >= dq[0].capacity - EPS:
             nxt = dq.popleft()
-            self.n_packets[packet_type] -= 1
+
             pkt.energy += nxt.energy
 
             if DEBUG_LOG:
                 print(f'[{self.ID}] Packet {pkt} absorbed {nxt}. New packet count is {self.n_packets[packet_type]}')
+
+            if REC_EVTS:
                 evt_type_mapping = {
-                    PacketType.EXCESS: EventType.EXCESS_ABSORBED_AT_BOTTOM,
-                    PacketType.DEFICIT: EventType.DEFICIT_ABSORBED_AT_BOTTOM,
-                    PacketType.BALANCED: EventType.BALANCED_ABSORBED_AT_BOTTOM,
+                    PacketType.EXCESS: EventType.EXCESS_ABSORBED_AT_FONT,
+                    PacketType.DEFICIT: EventType.DEFICIT_ABSORBED_AT_FRONT,
+                    PacketType.BALANCED: EventType.BALANCED_ABSORBED_AT_FRONT,
                 }
                 self.rec_evt(evt_type_mapping[packet_type])
 
         return pkt
 
-
+    @deprecated("Lift unbalanced heads to balanced tops will never happen in the current implentation.")
     def _lift_unbalanced_heads_to_balanced_top(self) -> None:
         """
         After BALANCED grows, EXCESS/DEFICIT heads might now be below the new top_blc.
@@ -285,12 +369,15 @@ class PhasePair:
             if dq[0].capacity + EPS >= top_blc:
                 continue
 
+            raise
             # take head out, lift it, then absorb any now-reachable packets
             head = dq.popleft()
-            self.n_packets[packet_type] -= 1
+
             head.capacity = top_blc
             if DEBUG_LOG:
                 print(f'[{self.ID}] {packet_type.name} head detached and raised above BALANCED top which might cause absorption. New packet count is {self.n_packets[packet_type]}')
+
+            if REC_EVTS:
                 evt_type_mapping = {
                     PacketType.EXCESS: EventType.EXCESS_RAISED_TO_BALANCED_TOP,
                     PacketType.DEFICIT: EventType.DEFICIT_RAISED_TO_BALANCED_TOP,
@@ -302,7 +389,7 @@ class PhasePair:
             head = self._absorb_front_overlaps(packet_type, head)
 
             dq.appendleft(head)
-            self.n_packets[packet_type] += 1
+
             if DEBUG_LOG:
                 print(f'[{self.ID}] {packet_type.name} head reattached. New packet count is {self.n_packets[packet_type]}')
 
@@ -313,7 +400,16 @@ class PhasePair:
         Append a packet of a given type to the left of the appropriate list.
         Asserts that the packet will conserve the canonical order of capacities compared to the BALANCED one and the list of same type.
         """
-        if DEBUG_LOG: print(f'[{self.ID}] Appending {packet_type.name} packet left: {energy_packet}')
+        if DEBUG_LOG:
+            print(f'[{self.ID}] Appending {packet_type.name} packet left: {energy_packet}')
+
+        if REC_EVTS:
+            evt_type_mapping = {
+                PacketType.EXCESS: EventType.APPEND_LEFT_EXCESS,
+                PacketType.DEFICIT: EventType.APPEND_LEFT_DEFICIT,
+                PacketType.BALANCED: EventType.APPEND_LEFT_BALANCED,
+            }
+            self.rec_evt(evt_type_mapping[packet_type])
 
         top_blc = self._balanced_top()
 
@@ -321,6 +417,8 @@ class PhasePair:
         if energy_packet.capacity < top_blc - EPS:
             if DEBUG_LOG:
                 print(f'[{self.ID}] Balanced top at {top_blc} was higher -> increased the packets capacity')
+
+            if REC_EVTS:
                 evt_type_mapping = {
                     PacketType.EXCESS: EventType.EXCESS_RAISED_TO_BALANCED_TOP,
                     PacketType.DEFICIT: EventType.DEFICIT_RAISED_TO_BALANCED_TOP,
@@ -329,6 +427,7 @@ class PhasePair:
 
                 self.rec_evt(evt_type_mapping[packet_type])
 
+            raise
             energy_packet.capacity = top_blc
 
 
@@ -337,17 +436,25 @@ class PhasePair:
             # not actually a "left append" case; fall back to tail insertion
             if DEBUG_LOG:
                 print(f'[{self.ID}] {packet_type.name} Appending left is not allowed! Fallback to normal append.')
-                self.rec_evt(f'WRONG APPEND CALL!')
 
+            if REC_EVTS:
+                self.rec_evt(f'WRONG APPEND CALL!')
+            raise
             return self.append_packet(packet_type, energy_packet)
 
-        energy_packet = self._absorb_front_overlaps(packet_type, energy_packet)
+        # energy_packet = self._absorb_front_overlaps(packet_type, energy_packet)  # not needed in current implementation
         dq.appendleft(energy_packet)
-        self.n_packets[packet_type] += 1
 
         if DEBUG_LOG:
             print(f'[{self.ID}] Packet appended left. New packet count is {self.n_packets[packet_type]}')
-            self.rec_evt(f'{packet_type.name} PACKET APPEND AT BOTTOM')
+
+        if REC_EVTS:
+            evt_type_mapping = {
+                PacketType.EXCESS: EventType.EXCESS_HOVERS_AT_BOTTOM,
+                PacketType.DEFICIT: EventType.DEFICIT_HOVERS_AT_BOTTOM,
+                PacketType.BALANCED: EventType.BALANCED_HOVERS_AT_BOTTOM,
+            }
+            self.rec_evt(evt_type_mapping[packet_type])
 
 
     @phasepair_invariants
@@ -358,7 +465,16 @@ class PhasePair:
         All packets have to be at least as high as the top of the highest BALANCED packet.
         When a packet has the same or a lower capacity and its capacity has to be increased, it will merge with the topmost packet.
         """
-        if DEBUG_LOG: print(f'[{self.ID}] Appending {packet_type.name} packet: {energy_packet}')
+        if DEBUG_LOG:
+            print(f'[{self.ID}] Appending {packet_type.name} packet: {energy_packet}')
+
+        if REC_EVTS:
+            evt_type_mapping = {
+                PacketType.EXCESS: EventType.APPEND_EXCESS,
+                PacketType.DEFICIT: EventType.APPEND_DEFICIT,
+                PacketType.BALANCED: EventType.APPEND_BALANCED,
+            }
+            self.rec_evt(evt_type_mapping[packet_type])
 
         top_blc = self._balanced_top()
 
@@ -366,6 +482,8 @@ class PhasePair:
             energy_packet.capacity = top_blc
             if DEBUG_LOG:
                 print(f'[{self.ID}] Balanced top at {top_blc} was higher -> increased the packets capacity')
+
+            if REC_EVTS:
                 evt_type_mapping = {
                     PacketType.EXCESS: EventType.EXCESS_RAISED_TO_BALANCED_TOP,
                     PacketType.DEFICIT: EventType.DEFICIT_RAISED_TO_BALANCED_TOP,
@@ -381,6 +499,8 @@ class PhasePair:
                 # merge contiguously/overlapping into last
                 if DEBUG_LOG:
                     print(f'[{self.ID}] {packet_type.name} top at {last.capacity_max} was higher -> packets energy merged instead')
+
+                if REC_EVTS:
                     evt_type_mapping = {
                         PacketType.EXCESS: EventType.EXCESS_ABSORBED_AT_TOP,
                         PacketType.DEFICIT: EventType.DEFICIT_ABSORBED_AT_TOP,
@@ -390,19 +510,20 @@ class PhasePair:
                     self.rec_evt(evt_type_mapping[packet_type])
 
 
-                energy_packet.capacity = last.capacity_max
+                #energy_packet.capacity = last.capacity_max
                 last.energy += energy_packet.energy
 
                 # IMPORTANT: if we extended BALANCED, lift heads before invariants run
-                if packet_type == PacketType.BALANCED:
-                    self._lift_unbalanced_heads_to_balanced_top()
+                #if packet_type == PacketType.BALANCED:
+                #    self._lift_unbalanced_heads_to_balanced_top()
                 return
 
         dq.append(energy_packet)
-        self.n_packets[packet_type] += 1
 
         if DEBUG_LOG:
             print(f'[{self.ID}] Packet appended. New packet count is {self.n_packets[packet_type]}')
+
+        if REC_EVTS:
             evt_type_mapping = {
                 PacketType.EXCESS: EventType.EXCESS_HOVERS_AT_TOP,
                 PacketType.DEFICIT: EventType.DEFICIT_HOVERS_AT_TOP,
@@ -411,8 +532,8 @@ class PhasePair:
 
             self.rec_evt(evt_type_mapping[packet_type])
 
-        if packet_type == PacketType.BALANCED:
-            self._lift_unbalanced_heads_to_balanced_top()
+        #if packet_type == PacketType.BALANCED:
+        #    self._lift_unbalanced_heads_to_balanced_top()
 
 
     @phasepair_invariants
@@ -421,9 +542,17 @@ class PhasePair:
         Will pop the first packet of a given type.
         """
         pkt = self.energy_packets[packet_type].popleft()
-        self.n_packets[packet_type] -= 1  # increase the number of packets
 
-        if DEBUG_LOG: print(f'[{self.ID}] First {packet_type.name} packet removed. New packet count is {self.n_packets[packet_type]}')
+        if DEBUG_LOG:
+            print(f'[{self.ID}] First {packet_type.name} packet removed. New packet count is {self.n_packets[packet_type]}')
+
+        if REC_EVTS:
+            evt_type_mapping = {
+                PacketType.EXCESS: EventType.POP_LEFT_EXCESS,
+                PacketType.DEFICIT: EventType.POP_LEFT_DEFICIT,
+                PacketType.BALANCED: EventType.POP_LEFT_BALANCED,
+            }
+            self.rec_evt(evt_type_mapping[packet_type])
         return pkt
 
 
@@ -433,14 +562,25 @@ class PhasePair:
         Will pop the last packet of a given type.
         """
         pkt = self.energy_packets[packet_type].pop()
-        self.n_packets[packet_type] -= 1  # increase the number of packets
-        if DEBUG_LOG: print(f'[{self.ID}] Last {packet_type.name} packet removed. New packet count is {self.n_packets[packet_type]}')
+
+        if DEBUG_LOG:
+            print(f'[{self.ID}] Last {packet_type.name} packet removed. New packet count is {self.n_packets[packet_type]}')
+
+        if REC_EVTS:
+            evt_type_mapping = {
+                PacketType.EXCESS: EventType.POP_EXCESS,
+                PacketType.DEFICIT: EventType.POP_DEFICIT,
+                PacketType.BALANCED: EventType.POP_BALANCED,
+            }
+            self.rec_evt(evt_type_mapping[packet_type])
         return pkt
 
 
     @phasepair_invariants
     def balance_packets(self):
-        self.rec_evt(EventType.BALANCED_PHASE)
+        if REC_EVTS:
+            self.rec_evt(EventType.BALANCED_PHASE)
+
         while self.phase_type == PacketType.UNDEFINED:
             self.balance_first_packet()
             if DEBUG_LOG: print('')
@@ -460,6 +600,8 @@ class PhasePair:
         if pkt_exs.capacity < pkt_def.capacity:
             if DEBUG_LOG:
                 print(f'[{self.ID}] EXCESS below DEFICIT -> increased the EXCESS packets capacity')
+
+            if REC_EVTS:
                 self.rec_evt(EventType.EXCESS_BELOW_DEFICIT)
 
             pkt_exs.capacity = pkt_def.capacity
@@ -467,6 +609,8 @@ class PhasePair:
         elif pkt_def.capacity < pkt_exs.capacity:
             if DEBUG_LOG:
                 print(f'[{self.ID}] DEFICIT below EXCESS -> increased the DEFICIT packets capacity')
+
+            if REC_EVTS:
                 self.rec_evt(EventType.DEFICIT_BELOW_EXCESS)
 
             pkt_def.capacity = pkt_exs.capacity
@@ -494,6 +638,8 @@ class PhasePair:
             # but creating new for residual is cleaner for ownership.
             if DEBUG_LOG:
                 print(f'[{self.ID}] DEFICIT remaining')
+
+            if REC_EVTS:
                 self.rec_evt(EventType.DEFICIT_REMAINING)
 
             pkt_residual = EnergyPacket(capacity=pkt_balanced.capacity_max, energy=diff)
@@ -503,6 +649,8 @@ class PhasePair:
             # Excess was larger; Deficit is fully consumed.
             if DEBUG_LOG:
                 print(f'[{self.ID}] EXCESS remaining')
+
+            if REC_EVTS:
                 self.rec_evt(EventType.EXCESS_REMAINING)
 
             pkt_residual = EnergyPacket(capacity=pkt_balanced.capacity_max, energy=-diff)
@@ -552,7 +700,10 @@ class PhaseGroup:
         if self.group_type == PacketType.BALANCED:
             if DEBUG_LOG:
                 print(f'[{self.ID}] Nothing to balance.')
+
+            if REC_EVTS:
                 self.rec_evt(EventType.BALANCE_OBSOLETE)
+
             self.shift_inputs = []
             return
 
@@ -562,7 +713,9 @@ class PhaseGroup:
 
         if DEBUG_LOG:
             print(f'[{self.ID}] Balancing group: {self}')
-            self.rec_evt(EventType.BALANCING_GROUP)
+
+        if REC_EVTS:
+            self.rec_evt(EventType.BALANCE_GROUP)
 
         phase_pair = ctx.phase_pairs[self.index_start]
 
@@ -576,12 +729,12 @@ class PhaseGroup:
                 index=None,
                 capacity_hurdle=ctx.phase_pairs[self.index_start].energy_packets[PacketType.BALANCED][-1].capacity_max
             )]
-            if DEBUG_LOG:
+            if REC_EVTS:
                 self.rec_evt(EventType.BALANCE_CREATES_HURDLE)
         else:
             self.shift_inputs = [ShiftInput(
                 index=self.index_start,
-                capacity_hurdle=ctx.phase_pairs[self.index_start].energy_packets[self.group_type][0].capacity
+                capacity_hurdle=0#ctx.phase_pairs[self.index_start].energy_packets[self.group_type][0].capacity
             )]
 
 
@@ -624,6 +777,8 @@ class PhaseGroup:
         if new_type is None:
             if DEBUG_LOG:
                 print(f'[{self.ID}] Merge rejected with reason: {reason}')
+
+            if REC_EVTS:
                 evt_mapping = {
                     (PacketType.UNDEFINED, PacketType.UNDEFINED): EventType.MERGE_REJECTED_UND,
                     (PacketType.UNDEFINED, PacketType.BALANCED): EventType.MERGE_REJECTED_UND,
@@ -645,6 +800,8 @@ class PhaseGroup:
 
         if DEBUG_LOG:
             print(f'[{self.ID}] Merge allowed with reason: {reason}')
+
+        if REC_EVTS:
             evt_mapping = {
                 (PacketType.BALANCED, PacketType.BALANCED): EventType.MERGE_BAL_BAL,
                 (PacketType.EXCESS, PacketType.EXCESS): EventType.MERGE_EXC_EXC,
@@ -684,7 +841,9 @@ class PhaseGroup:
         if self.group_type == PacketType.BALANCED or (self.group_type == PacketType.DEFICIT and self.index_start == self.index_end):
             if DEBUG_LOG:
                 print(f'[{self.ID}] Nothing to shift.')
-                self.rec_evt(EventType.SHIFT_OBSOLETE)
+
+            if REC_EVTS:
+                self.rec_evt(EventType.SHIFT_GROUP_OBSOLETE)
 
             if self.group_type == PacketType.DEFICIT:
                 self.group_type = PacketType.UNDEFINED
@@ -696,7 +855,9 @@ class PhaseGroup:
 
         if DEBUG_LOG:
             print(f'[{self.ID}] Shifting energy packets to {index_target}.')
-            self.rec_evt(EventType.SHIFTING_GROUP)
+
+        if REC_EVTS:
+            self.rec_evt(EventType.SHIFT_GROUP)
 
         capacity_hurdle = 0.0
 
@@ -732,18 +893,22 @@ class PhaseGroup:
 
                 if DEBUG_LOG:
                     print(f'[{self.ID}] Shifting {pkt}')
+
+                if REC_EVTS:
                     evt_mapping = {
-                        PacketType.EXCESS: EventType.SHIFT_EXCESS_PACKET,
-                        PacketType.DEFICIT: EventType.SHIFT_DEFICIT_PACKET,
+                        PacketType.EXCESS: EventType.SHIFT_PACKET_EXCESS,
+                        PacketType.DEFICIT: EventType.SHIFT_PACKET_DEFICIT,
                     }
                     self.rec_evt(evt_mapping[self.group_type])
 
                 if pkt.capacity < capacity_hurdle - EPS:
                     if DEBUG_LOG:
                         print(f'[{self.ID}] Packet jumped over hurdle {capacity_hurdle} -> increase packets capacity')
+
+                    if REC_EVTS:
                         evt_mapping = {
-                            PacketType.EXCESS: EventType.EXCESS_JUMPS_HURDLE,
-                            PacketType.DEFICIT: EventType.DEFICIT_JUMPS_HURDLE,
+                            PacketType.EXCESS: EventType.HURDLE_JUMP_BY_EXCESS,
+                            PacketType.DEFICIT: EventType.HURDLE_JUMP_BY_DEFICIT,
                         }
                         self.rec_evt(evt_mapping[self.group_type])
 
@@ -785,11 +950,11 @@ class Context:
 
     @property
     def n_unbalanced_excess(self):
-        return sum([phase_pair.n_packets[PacketType.EXCESS] for phase_pair in self.phase_pairs])
+        return sum([phase_pair.n_packets_excess for phase_pair in self.phase_pairs])
 
     @property
     def n_unbalanced_deficit(self):
-        return sum([phase_pair.n_packets[PacketType.DEFICIT] for phase_pair in self.phase_pairs])
+        return sum([phase_pair.n_packets_deficit for phase_pair in self.phase_pairs])
 
 
     def __post_init__(self):
@@ -818,6 +983,8 @@ class Context:
         if DEBUG_LOG:
             print(f'vvvvvvvvvvvvvvvvv BALANCE vvvvvvvvvvvvvvvvv')
             print(self.format_phase_table_console())
+
+        if REC_EVTS:
             self.rec_evt(EventType.BALANCE_STEP)
 
         for phase_group in self.phase_groups:
@@ -848,6 +1015,8 @@ class Context:
         if DEBUG_LOG:
             print("vvvvvvvvvvvvvvvvv MERGE vvvvvvvvvvvvvvvvv")
             print(self.format_phase_table_console())
+
+        if REC_EVTS:
             self.rec_evt(EventType.MERGE_STEP)
 
         # Canonicalize rotation for determinism
@@ -919,6 +1088,8 @@ class Context:
         if DEBUG_LOG:
             print("vvvvvvvvvvvvvvvvv SHIFT vvvvvvvvvvvvvvvvv")
             print(self.format_phase_table_console())
+
+        if REC_EVTS:
             self.rec_evt(EventType.SHIFT_STEP)
 
         for grp in self.phase_groups:
@@ -939,6 +1110,8 @@ class Context:
             self.shift_groups()
             if DEBUG_LOG:
                 print(f'\n\n ++++++++++++++++ ITERATION {self.n_iterations} ++++++++++++++ \n\n')
+
+            if REC_EVTS:
                 self.rec_evt('NEXT_ITERATION')
 
             self.balance()
@@ -971,11 +1144,11 @@ class Context:
     def _pp_get_n(pp: PhasePair, tp: PacketType) -> int:
         # Prefer new API
         if hasattr(pp, "n_packets"):
-            return int(pp.n_packets.get(tp, 0))
+            return int(pp.n_packets[tp])
         # Fallback to old API
         if tp == PacketType.BALANCED:
             return 0
-        return int(pp.n_packets.get(tp, 0))
+        return int(pp.n_packets.get[tp])
 
 
     @staticmethod
@@ -1501,21 +1674,21 @@ ep[3] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |  
     energy_deficit_per_phase_initial = [10, 2, 20, 30, 40, 3, 2, 50, 60, 2, 6, 4, 5, 1, 70, 1, 2, 1, 4]
 
     result_ref = """
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-PG    |                                                            15..5 BAL                                                            ||                                6..10 EXC                                 ||                       11..14 BAL                       |
-H     |                                                                                                                                 ||       51        |                                                        ||                                                        |
-SI    |                                                                                                                                 ||        6        |                                                        ||                                                        |
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-PP    |     15      |     16      |     17      |      0       |      1      |      2       |      3       |      4       |      5      ||        6        |      7       |      8      |      9      |     10      ||     11      |     12      |      13      |     14      |
-PT    | e |  b  | d | e |  b  | d | e |  b  | d | e |  b   | d | e |  b  | d | e |  b   | d | e |  b   | d | e |  b   | d | e |  b  | d ||  e   |  b   | d | e |  b   | d | e |  b  | d | e |  b  | d | e |  b  | d || e |  b  | d | e |  b  | d | e |  b   | d | e |  b  | d |
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-n     | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1   | 0 | 0 |  1   | 0 | 0 |  1  | 0 ||  1   |  4   | 0 | 0 |  1   | 0 | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1  | 0 || 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1  | 0 |
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-ep[0] |   | 0,2 |   |   | 0,1 |   |   | 0,5 |   |   | 0,42 |   |   | 0,3 |   |   | 0,10 |   |   | 0,20 |   |   | 0,60 |   |   | 0,2 |   || 51,2 | 0,1  |   |   | 0,10 |   |   | 0,2 |   |   | 0,5 |   |   | 0,2 |   ||   | 0,5 |   |   | 0,1 |   |   | 0,50 |   |   | 0,1 |   |
-ep[1] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 2,1  |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
-ep[2] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 42,4 |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
-ep[3] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 50,1 |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+PG    |                                                            16..5 BAL                                                            ||                                        6..11 EXC                                        ||                       12..15 BAL                       |
+H     |                                                                                                                                 ||       71        |                                                                       ||                                                        |
+SI    |                                                                                                                                 ||        6        |                                                                       ||                                                        |
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+PP    |     16      |     17      |     18      |      0       |      1      |      2       |      3       |      4       |      5      ||        6        |      7       |      8       |      9      |     10      |     11      ||     12      |     13      |      14      |     15      |
+PT    | e |  b  | d | e |  b  | d | e |  b  | d | e |  b   | d | e |  b  | d | e |  b   | d | e |  b   | d | e |  b   | d | e |  b  | d ||  e   |  b   | d | e |  b   | d | e |  b   | d | e |  b  | d | e |  b  | d | e |  b  | d || e |  b  | d | e |  b  | d | e |  b   | d | e |  b  | d |
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+n     | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1   | 0 | 0 |  1   | 0 | 0 |  1  | 0 ||  1   |  4   | 0 | 0 |  1   | 0 | 0 |  1   | 0 | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1  | 0 || 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1  | 0 |
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ep[0] |   | 0,2 |   |   | 0,1 |   |   | 0,4 |   |   | 0,11 |   |   | 0,1 |   |   | 0,20 |   |   | 0,30 |   |   | 0,40 |   |   | 0,3 |   || 71,2 | 0,1  |   |   | 0,50 |   |   | 0,60 |   |   | 0,1 |   |   | 0,5 |   |   | 0,3 |   ||   | 0,5 |   |   | 0,1 |   |   | 0,70 |   |   | 0,1 |   |
+ep[1] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 3,1  |   |   |      |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
+ep[2] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 60,2 |   |   |      |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
+ep[3] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 70,1 |   |   |      |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 """
 
     ctx = Context(energy_excess_per_phase_initial=energy_excess_per_phase_initial, energy_deficit_per_phase_initial=energy_deficit_per_phase_initial)
@@ -1530,8 +1703,6 @@ ep[3] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |  
         print('Reference:\n', result_ref)
 
         print('Result:\n', result)
-
-
 
 
 
@@ -1623,16 +1794,48 @@ def build_worst_case_cycle(
 
 
 if __name__ == '__main__':
+    n = 10000
+    ratio_balanced = 0.3
+    n_balanced = int(n * ratio_balanced)
+    n_unbalanced = n - n_balanced
 
+    import random
 
-    n = 100
-    ex, de = build_worst_case_cycle(n, base=100, e_low=30, e_high=40)
-    
-    ctx = Context(energy_excess_per_phase_initial=ex,
-                  energy_deficit_per_phase_initial=de)
+    def random_energy():
+        #return random.randint(1,100)
+        return random.random()*1000
+
+    blc = deque([random_energy() for _ in range(n_balanced)])
+    ex = deque([random_energy() for _ in range(n_unbalanced)])
+    de = deque([random_energy() for _ in range(n_unbalanced)])
+
+    while len(blc):
+        insert = random.random() <= ratio_balanced
+        ex.rotate(1)
+        de.rotate(1)
+        if insert:
+            e = blc.pop()
+            ex.append(e)
+            de.append(e)
+
+    ctx = Context(energy_excess_per_phase_initial=ex, energy_deficit_per_phase_initial=de)
     ctx.run_mEfES()
 
+    ex, de = build_worst_case_cycle(n, base=100, e_low=30, e_high=40)
 
-    #run_example()
+    ctx = Context(energy_excess_per_phase_initial=ex, energy_deficit_per_phase_initial=de)
+    ctx.run_mEfES()
 
-    print(EventRecorder())
+    run_example()
+
+    print('Finished')
+    #print(EventRecorder().print_events(show_all=True))
+
+    evts = EventRecorder().observed_events_in_order
+    for i in range(len(evts)):
+        if evts[i].evt_type.endswith('RAISED_TO_BALANCED_TOP') and evts[i-1].evt_type == EventType.APPEND_BALANCED.name:
+            print(f'{evts[i].evt_type} after {evts[i-1].evt_type}')
+
+        if 'ABSORBED_AT_FRONT' in evts[i].evt_type:
+            print(f'{evts[i].evt_type} after {evts[i-1].evt_type} after {evts[i-2].evt_type} after {evts[i-3].evt_type}')
+            #'APPEND_LEFT' in evts[i-1].evt_type and
