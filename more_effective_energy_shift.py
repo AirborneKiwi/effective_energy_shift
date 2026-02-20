@@ -8,28 +8,11 @@ from collections import deque, defaultdict
 from dataclasses import dataclass, field, InitVar
 from os import times_result
 
-from typing import Deque, List, Set, Dict, Tuple, Iterable
+from typing import Deque, List, Set, Dict, Tuple, Iterable, Optional, Iterator
 from typing import Callable, TypeVar, ParamSpec, cast
 from warnings import deprecated
 
-
-class PacketType(IntEnum):
-    EXCESS = 0
-    DEFICIT = 1
-    BALANCED = 2
-    UNDEFINED = 3
-
-
-@dataclass
-class EnergyPacket:
-    capacity: float
-    energy: float
-
-    @property
-    def capacity_max(self) -> float:
-        return self.capacity + self.energy
-
-EPS = 1e-12
+EPS = 1e-8
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -37,7 +20,8 @@ R = TypeVar("R")
 # Toggle at import-time / runtime.
 CHECK_INVARIANTS = True
 DEBUG_LOG = False
-REC_EVTS = True
+REC_EVTS = False
+
 
 class EventType(Enum):
     APPEND_EXCESS = auto(),
@@ -185,6 +169,372 @@ class EventRecorder:
         return s
 
 
+
+class PacketType(IntEnum):
+    EXCESS = 0
+    DEFICIT = 1
+    BALANCED = 2
+    UNDEFINED = 3
+
+
+@dataclass
+class EnergyPacket:
+    capacity: float
+    energy: float
+
+    def __post_init__(self):
+        if self.capacity < 0:
+            raise ValueError("capacity must be non-negative")
+
+        if self.energy <= 0:
+            raise ValueError("energy must be positive")
+
+    @property
+    def capacity_max(self) -> float:
+        return self.capacity + self.energy
+
+    @property
+    def start(self) -> float:
+        return self.capacity
+
+    @property
+    def end(self) -> float:
+        return self.capacity_max
+
+    def precedes(self, other: "EnergyPacket") -> bool:
+        """True if self is entirely before other (allowing contact within EPS)."""
+        return self.end <= other.start + EPS
+
+    def starts_below_level(self, level: float) -> bool:
+        """True if self.start is below `level` by more than EPS."""
+        return self.start + EPS < level
+
+    def starts_at_or_above_level(self, level: float) -> bool:
+        return not self.starts_below_level(level)
+
+    def starts_below(self, other: "EnergyPacket") -> bool:
+        return self.start + EPS < other.start
+
+    def starts_above(self, other: "EnergyPacket") -> bool:
+        return self.start > other.end + EPS
+
+    def starts_within(self, other: "EnergyPacket") -> bool:
+        return not (self.starts_below(other) or self.starts_above(other))
+
+    def ends_below(self, other: "EnergyPacket") -> bool:
+        return self.end + EPS < other.start
+
+    def ends_above(self, other: "EnergyPacket") -> bool:
+        return self.end > other.end + EPS
+
+    def ends_within(self, other: "EnergyPacket") -> bool:
+        return not (self.ends_below(other) or self.ends_above(other))
+
+    def _delta(self, other: "EnergyPacket") -> float:
+        left = max(self.capacity, other.capacity)
+        right = min(self.capacity_max, other.capacity_max)
+        return right - left
+
+    def overlaps_with(self, other: "EnergyPacket") -> bool:
+        """Overlap INCLUDING contact (within EPS)."""
+        return self._delta(other) >= -EPS
+
+    def contact_with(self, other: "EnergyPacket") -> bool:
+        """True if they touch (intersection ~ 0), within EPS tolerance."""
+        return abs(self._delta(other)) <= EPS
+
+    def overlap_or_contact(self, other: "EnergyPacket") -> bool:
+        return self.overlaps_with(other)
+
+    def overlaps_strictly_with(self, other: "EnergyPacket") -> bool:
+        """Strict positive-length overlap beyond EPS (touch/contact is NOT strict)."""
+        return self._delta(other) > EPS
+
+
+    def lift_to(self, level: float) -> 'EnergyPacket':
+        """Allows increasing the capacity to a level, but never allows lowering."""
+        if self.starts_below_level(level):
+            self.capacity = level
+
+        return self
+
+
+
+class PacketLaneError(ValueError): ...
+class PacketOverlapError(PacketLaneError): ...
+class PacketOrderError(PacketLaneError): ...
+
+
+@dataclass
+class EnergyPacketLane:
+    lane_type: PacketType
+    dq: Deque[EnergyPacket] = field(default_factory=deque)
+
+    @property
+    def ID(self) -> str:
+        return f'{self.lane_type.name} Lane'
+
+
+    def rec_evt(self, evt_type: str|EventType):
+        EventRecorder().record(Event(evt_type=evt_type, triggered_by=self.ID))
+
+
+    def __len__(self) -> int:
+        return len(self.dq)
+
+    def __iter__(self) -> Iterator[EnergyPacket]:
+        return iter(self.dq)
+
+    def peek_left(self) -> Optional[EnergyPacket]:
+        return self.dq[0] if self.dq else None
+
+    def peek_right(self) -> Optional[EnergyPacket]:
+        return self.dq[-1] if self.dq else None
+
+    @staticmethod
+    def _log_pop_left(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            res = func(self, *args, **kwargs)
+
+            if DEBUG_LOG:
+                print(f'[{self.ID}] First {self.lane_type.name} packet removed. New packet count is {len(self)}')
+
+            return res
+
+        return wrapper
+
+    @staticmethod
+    def _rec_evt_pop_left(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            res = func(self, *args, **kwargs)
+
+            if REC_EVTS:
+                evt_type_mapping = {
+                    PacketType.EXCESS: EventType.POP_LEFT_EXCESS,
+                    PacketType.DEFICIT: EventType.POP_LEFT_DEFICIT,
+                    PacketType.BALANCED: EventType.POP_LEFT_BALANCED,
+                }
+                self.rec_evt(evt_type_mapping[self.lane_type])
+
+            return res
+
+        return wrapper
+
+    @_rec_evt_pop_left
+    @_log_pop_left
+    def pop_left(self) -> EnergyPacket:
+        return self.dq.popleft()
+
+
+    @staticmethod
+    def _log_pop_right(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            res = func(self, *args, **kwargs)
+
+            if DEBUG_LOG:
+                print(f'[{self.ID}] Last {self.lane_type.name} packet removed. New packet count is {len(self)}')
+
+            return res
+
+        return wrapper
+
+    @staticmethod
+    def _rec_evt_pop_right(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            res = func(self, *args, **kwargs)
+
+            if REC_EVTS:
+                evt_type_mapping = {
+                    PacketType.EXCESS: EventType.POP_RIGHT_EXCESS,
+                    PacketType.DEFICIT: EventType.POP_RIGHT_DEFICIT,
+                    PacketType.BALANCED: EventType.POP_RIGHT_BALANCED,
+                }
+                self.rec_evt(evt_type_mapping[self.lane_type])
+
+            return res
+
+        return wrapper
+
+    @_rec_evt_pop_right
+    @_log_pop_right
+    def pop_right(self) -> EnergyPacket:
+        return self.dq.pop()
+
+
+    @staticmethod
+    def _log_append_packet(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, pkt: EnergyPacket, *args, **kwargs):
+            if DEBUG_LOG:
+                print(f'[{self.ID}] Appending packet: {pkt}')
+
+            res = func(self, pkt, *args, **kwargs)
+
+            if REC_EVTS:
+                evt_type_mapping = {
+                    PacketType.EXCESS: EventType.EXCESS_HOVERS_AT_TOP,
+                    PacketType.DEFICIT: EventType.DEFICIT_HOVERS_AT_TOP,
+                    PacketType.BALANCED: EventType.BALANCED_HOVERS_AT_TOP,
+                }
+                self.rec_evt(evt_type_mapping[self.lane_type])
+
+            return res
+
+        return wrapper
+
+    @staticmethod
+    def _rec_evt_append_packet(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, pkt: EnergyPacket, *args, **kwargs):
+            if REC_EVTS:
+                evt_type_mapping = {
+                    PacketType.EXCESS: EventType.APPEND_EXCESS,
+                    PacketType.DEFICIT: EventType.APPEND_DEFICIT,
+                    PacketType.BALANCED: EventType.APPEND_BALANCED,
+                }
+                self.rec_evt(evt_type_mapping[self.lane_type])
+
+            res = func(self, pkt, *args, **kwargs)
+
+            if REC_EVTS:
+                evt_type_mapping = {
+                    PacketType.EXCESS: EventType.EXCESS_HOVERS_AT_TOP,
+                    PacketType.DEFICIT: EventType.DEFICIT_HOVERS_AT_TOP,
+                    PacketType.BALANCED: EventType.BALANCED_HOVERS_AT_TOP,
+                }
+                self.rec_evt(evt_type_mapping[self.lane_type])
+
+            return res
+
+        return wrapper
+
+    @_rec_evt_append_packet
+    @_log_append_packet
+    def append_packet(self, pkt: EnergyPacket) -> 'EnergyPacketLane':
+        """
+        Tail-append:
+          - merges touching (within EPS)
+          - raises on strict overlap
+          - raises if start order goes backwards
+        """
+        if not self.dq:
+            self.dq.append(pkt)
+            return self
+
+        last = self.dq[-1]
+
+        #if pkt.start + EPS < last.end:
+        #    pkt.start = last.start
+            #raise PacketOrderError(f"Tail append out-of-order: {pkt.start} < {last.start}")
+
+        #if last.overlaps_strictly_with(pkt):
+            #raise PacketOverlapError(f"Tail append strict overlap: last={last}, pkt={pkt}")
+
+        if pkt.starts_below_level(last.end) or pkt.contact_with(last):
+            last.energy += pkt.energy
+            return self
+
+        self.dq.append(pkt)
+
+        return self
+
+    @staticmethod
+    def _log_append_packet_left(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, pkt: EnergyPacket, *args, **kwargs):
+            if DEBUG_LOG:
+                print(f'[{self.ID}] Appending packet left: {pkt}')
+            res = func(self, pkt, *args, **kwargs)
+            if DEBUG_LOG:
+                print(f'[{self.ID}] Packet appended left. New packet count is {len(self)}')
+            return res
+
+        return wrapper
+
+    @staticmethod
+    def _rec_evt_append_packet_left(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, pkt: EnergyPacket, *args, **kwargs):
+            if REC_EVTS:
+                evt_type_mapping = {
+                    PacketType.EXCESS: EventType.APPEND_LEFT_EXCESS,
+                    PacketType.DEFICIT: EventType.APPEND_LEFT_DEFICIT,
+                    PacketType.BALANCED: EventType.APPEND_LEFT_BALANCED,
+                }
+                self.rec_evt(evt_type_mapping[self.lane_type])
+
+            res = func(self, pkt, *args, **kwargs)
+
+            if REC_EVTS:
+                evt_type_mapping = {
+                    PacketType.EXCESS: EventType.EXCESS_HOVERS_AT_BOTTOM,
+                    PacketType.DEFICIT: EventType.DEFICIT_HOVERS_AT_BOTTOM,
+                    PacketType.BALANCED: EventType.BALANCED_HOVERS_AT_BOTTOM,
+                }
+                self.rec_evt(evt_type_mapping[self.lane_type])
+
+            return res
+
+        return wrapper
+
+    @_rec_evt_append_packet_left
+    @_log_append_packet_left
+    def append_packet_left(self, pkt: EnergyPacket) -> 'EnergyPacketLane':
+        """
+        Left-append with canonicalization:
+          - absorb any head packets with lower start
+          - absorb any head packets that touch/overlap pkt after it grows
+        """
+
+        # absorb packets starting below pkt.start
+        while self.dq and (self.dq[0].start + EPS < pkt.start):
+            lower = self.dq.popleft()
+            pkt.energy += lower.energy
+
+        # absorb packets that now touch/overlap pkt
+        while self.dq and pkt.overlaps_with(self.dq[0]):
+            nxt = self.dq.popleft()
+            pkt.energy += nxt.energy
+
+        # safety: must not leave a strict overlap at the boundary
+        if self.dq and pkt.overlaps_strictly_with(self.dq[0]):
+            raise PacketOverlapError(f"Left append left strict overlap remained: pkt={pkt}, next={self.dq[0]}")
+
+        self.dq.appendleft(pkt)
+
+        return self
+
+    @staticmethod
+    def _log_lift_front_to(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, level: float, *args, **kwargs):
+            if DEBUG_LOG:
+                print(f'[{self.ID}] Lift request to {level}')
+
+            res = func(self, level, *args, **kwargs)
+            return res
+
+        return wrapper
+
+    @_log_lift_front_to
+    def lift_front_to(self, level: float) -> 'EnergyPacketLane':
+        """
+        Pop head, raise to `level` if needed, insert left again.
+        """
+        if not self.dq:
+            return self
+        head = self.dq[0]
+        if head.start + EPS < level:
+            head = self.pop_left()
+            head.lift_to(level)
+            self.append_packet_left(head)
+        return self
+
+
 def phasepair_invariants(method: Callable[P, R]) -> Callable[P, R]:
     """
     Minimal decorator for PhasePair instance methods.
@@ -197,6 +547,7 @@ def phasepair_invariants(method: Callable[P, R]) -> Callable[P, R]:
     - Assumes the decorated method is a bound PhasePair method (self is first arg).
     - Post-check only (no pre-check), as requested.
     """
+
     if not (__debug__ and CHECK_INVARIANTS):
         return method  # no wrapping at all
 
@@ -217,7 +568,11 @@ class PhasePair:
     """
     index_phase: int
 
-    energy_packets: Dict[PacketType, Deque[EnergyPacket]] = field(default_factory=lambda: {tp: deque() for tp in [PacketType.EXCESS, PacketType.DEFICIT, PacketType.BALANCED]})
+    energy_packets: Dict[PacketType, EnergyPacketLane] = field(
+        default_factory=lambda: {
+            tp: EnergyPacketLane(lane_type=tp) for tp in (PacketType.EXCESS, PacketType.DEFICIT, PacketType.BALANCED)
+        }
+    )
 
     energy_excess_initial: InitVar[float | None] = None
     energy_deficit_initial: InitVar[float | None] = None
@@ -282,25 +637,31 @@ class PhasePair:
     def n_packets_balanced(self):
         return len(self.energy_packets[PacketType.BALANCED])
 
-
     def _check_invariants(self):
         for tp in (PacketType.EXCESS, PacketType.DEFICIT, PacketType.BALANCED):
+            lane = self.energy_packets[tp]
+            dq = lane.dq
 
-            dq = self.energy_packets[tp]
+            if tp == PacketType.BALANCED and len(dq):
+                assert dq[0].capacity == 0
+
             for a, b in zip(dq, list(dq)[1:]):
-                assert a.capacity_max <= b.capacity + EPS
+                # canonical ordering + no overlaps (contact OK)
+                assert a.precedes(b), f"{a = }, {b = }"
+                assert a.start < b.start
 
         top_blc = self._balanced_top()
         for tp in (PacketType.EXCESS, PacketType.DEFICIT):
-            for p in self.energy_packets[tp]:
-                assert p.capacity + EPS >= top_blc
+            for p in self.energy_packets[tp].dq:
+                assert p.starts_at_or_above_level(top_blc), f"{p.start} and {top_blc}"
 
         assert self.N_unbalanced_total >= 0
 
 
     def _tail_capacity_max(self, packet_type: PacketType) -> float:
-        dq = self.energy_packets[packet_type]
-        return dq[-1].capacity_max if dq else float("-inf")
+        lane = self.energy_packets[packet_type]
+        tail = lane.peek_right()
+        return tail.capacity_max if tail else float("-inf")
 
 
     def _balanced_top(self) -> float:
@@ -329,70 +690,8 @@ class PhasePair:
         return self.n_packets_excess + self.n_packets_deficit
 
 
-    def _absorb_front_overlaps(self, packet_type: PacketType, pkt: EnergyPacket) -> EnergyPacket:
-        """
-        Merge packets from the *front* of deque `packet_type` into `pkt` while pkt reaches/touches them.
-        Potentially absorbs multiple packets.
-        """
-        dq = self.energy_packets[packet_type]
-
-        while dq and pkt.capacity_max >= dq[0].capacity - EPS:
-            nxt = dq.popleft()
-
-            pkt.energy += nxt.energy
-
-            if DEBUG_LOG:
-                print(f'[{self.ID}] Packet {pkt} absorbed {nxt}. New packet count is {self.n_packets[packet_type]}')
-
-            if REC_EVTS:
-                evt_type_mapping = {
-                    PacketType.EXCESS: EventType.EXCESS_ABSORBED_AT_FONT,
-                    PacketType.DEFICIT: EventType.DEFICIT_ABSORBED_AT_FRONT,
-                    PacketType.BALANCED: EventType.BALANCED_ABSORBED_AT_FRONT,
-                }
-                self.rec_evt(evt_type_mapping[packet_type])
-
-        return pkt
-
-    @deprecated("Lift unbalanced heads to balanced tops will never happen in the current implentation.")
-    def _lift_unbalanced_heads_to_balanced_top(self) -> None:
-        """
-        After BALANCED grows, EXCESS/DEFICIT heads might now be below the new top_blc.
-        Lift the head to top_blc and merge forward if that causes overlaps.
-        Only the head needs checking because deques are ordered.
-        """
-        top_blc = self._balanced_top()
-        for packet_type in (PacketType.EXCESS, PacketType.DEFICIT):
-            dq = self.energy_packets[packet_type]
-            if not dq:
-                continue
-            if dq[0].capacity + EPS >= top_blc:
-                continue
-
-            raise
-            # take head out, lift it, then absorb any now-reachable packets
-            head = dq.popleft()
-
-            head.capacity = top_blc
-            if DEBUG_LOG:
-                print(f'[{self.ID}] {packet_type.name} head detached and raised above BALANCED top which might cause absorption. New packet count is {self.n_packets[packet_type]}')
-
-            if REC_EVTS:
-                evt_type_mapping = {
-                    PacketType.EXCESS: EventType.EXCESS_RAISED_TO_BALANCED_TOP,
-                    PacketType.DEFICIT: EventType.DEFICIT_RAISED_TO_BALANCED_TOP,
-                    PacketType.BALANCED: EventType.BALANCED_RAISED_TO_BALANCED_TOP,
-                }
-
-                self.rec_evt(evt_type_mapping[packet_type])
-
-            head = self._absorb_front_overlaps(packet_type, head)
-
-            dq.appendleft(head)
-
-            if DEBUG_LOG:
-                print(f'[{self.ID}] {packet_type.name} head reattached. New packet count is {self.n_packets[packet_type]}')
-
+    def lift_head_to(self, packet_type: PacketType, level: float) -> None:
+        self.energy_packets[packet_type].lift_front_to(level)
 
     @phasepair_invariants
     def append_packet_left(self, packet_type: PacketType, energy_packet: EnergyPacket):
@@ -400,61 +699,11 @@ class PhasePair:
         Append a packet of a given type to the left of the appropriate list.
         Asserts that the packet will conserve the canonical order of capacities compared to the BALANCED one and the list of same type.
         """
-        if DEBUG_LOG:
-            print(f'[{self.ID}] Appending {packet_type.name} packet left: {energy_packet}')
-
-        if REC_EVTS:
-            evt_type_mapping = {
-                PacketType.EXCESS: EventType.APPEND_LEFT_EXCESS,
-                PacketType.DEFICIT: EventType.APPEND_LEFT_DEFICIT,
-                PacketType.BALANCED: EventType.APPEND_LEFT_BALANCED,
-            }
-            self.rec_evt(evt_type_mapping[packet_type])
-
+        # enforce "above balanced top" (if required)
         top_blc = self._balanced_top()
 
-        # enforce/repair "above balanced"
-        if energy_packet.capacity < top_blc - EPS:
-            if DEBUG_LOG:
-                print(f'[{self.ID}] Balanced top at {top_blc} was higher -> increased the packets capacity')
-
-            if REC_EVTS:
-                evt_type_mapping = {
-                    PacketType.EXCESS: EventType.EXCESS_RAISED_TO_BALANCED_TOP,
-                    PacketType.DEFICIT: EventType.DEFICIT_RAISED_TO_BALANCED_TOP,
-                    PacketType.BALANCED: EventType.BALANCED_RAISED_TO_BALANCED_TOP,
-                }
-
-                self.rec_evt(evt_type_mapping[packet_type])
-
-            raise
-            energy_packet.capacity = top_blc
-
-
-        dq = self.energy_packets[packet_type]
-        if dq and energy_packet.capacity > dq[0].capacity + EPS:
-            # not actually a "left append" case; fall back to tail insertion
-            if DEBUG_LOG:
-                print(f'[{self.ID}] {packet_type.name} Appending left is not allowed! Fallback to normal append.')
-
-            if REC_EVTS:
-                self.rec_evt(f'WRONG APPEND CALL!')
-            raise
-            return self.append_packet(packet_type, energy_packet)
-
-        # energy_packet = self._absorb_front_overlaps(packet_type, energy_packet)  # not needed in current implementation
-        dq.appendleft(energy_packet)
-
-        if DEBUG_LOG:
-            print(f'[{self.ID}] Packet appended left. New packet count is {self.n_packets[packet_type]}')
-
-        if REC_EVTS:
-            evt_type_mapping = {
-                PacketType.EXCESS: EventType.EXCESS_HOVERS_AT_BOTTOM,
-                PacketType.DEFICIT: EventType.DEFICIT_HOVERS_AT_BOTTOM,
-                PacketType.BALANCED: EventType.BALANCED_HOVERS_AT_BOTTOM,
-            }
-            self.rec_evt(evt_type_mapping[packet_type])
+        # canonicalization happens in the lane (absorbs lower-start & overlaps)
+        self.energy_packets[packet_type].append_packet_left(energy_packet.lift_to(top_blc))
 
 
     @phasepair_invariants
@@ -465,75 +714,12 @@ class PhasePair:
         All packets have to be at least as high as the top of the highest BALANCED packet.
         When a packet has the same or a lower capacity and its capacity has to be increased, it will merge with the topmost packet.
         """
-        if DEBUG_LOG:
-            print(f'[{self.ID}] Appending {packet_type.name} packet: {energy_packet}')
 
-        if REC_EVTS:
-            evt_type_mapping = {
-                PacketType.EXCESS: EventType.APPEND_EXCESS,
-                PacketType.DEFICIT: EventType.APPEND_DEFICIT,
-                PacketType.BALANCED: EventType.APPEND_BALANCED,
-            }
-            self.rec_evt(evt_type_mapping[packet_type])
-
+        # enforce "above balanced top"
         top_blc = self._balanced_top()
 
-        if energy_packet.capacity < top_blc - EPS:
-            energy_packet.capacity = top_blc
-            if DEBUG_LOG:
-                print(f'[{self.ID}] Balanced top at {top_blc} was higher -> increased the packets capacity')
-
-            if REC_EVTS:
-                evt_type_mapping = {
-                    PacketType.EXCESS: EventType.EXCESS_RAISED_TO_BALANCED_TOP,
-                    PacketType.DEFICIT: EventType.DEFICIT_RAISED_TO_BALANCED_TOP,
-                    PacketType.BALANCED: EventType.BALANCED_RAISED_TO_BALANCED_TOP,
-                }
-
-                self.rec_evt(evt_type_mapping[packet_type])
-
-        dq = self.energy_packets[packet_type]
-        if dq:
-            last = dq[-1]
-            if energy_packet.capacity <= last.capacity_max + EPS:
-                # merge contiguously/overlapping into last
-                if DEBUG_LOG:
-                    print(f'[{self.ID}] {packet_type.name} top at {last.capacity_max} was higher -> packets energy merged instead')
-
-                if REC_EVTS:
-                    evt_type_mapping = {
-                        PacketType.EXCESS: EventType.EXCESS_ABSORBED_AT_TOP,
-                        PacketType.DEFICIT: EventType.DEFICIT_ABSORBED_AT_TOP,
-                        PacketType.BALANCED: EventType.BALANCED_ABSORBED_AT_TOP,
-                    }
-
-                    self.rec_evt(evt_type_mapping[packet_type])
-
-
-                #energy_packet.capacity = last.capacity_max
-                last.energy += energy_packet.energy
-
-                # IMPORTANT: if we extended BALANCED, lift heads before invariants run
-                #if packet_type == PacketType.BALANCED:
-                #    self._lift_unbalanced_heads_to_balanced_top()
-                return
-
-        dq.append(energy_packet)
-
-        if DEBUG_LOG:
-            print(f'[{self.ID}] Packet appended. New packet count is {self.n_packets[packet_type]}')
-
-        if REC_EVTS:
-            evt_type_mapping = {
-                PacketType.EXCESS: EventType.EXCESS_HOVERS_AT_TOP,
-                PacketType.DEFICIT: EventType.DEFICIT_HOVERS_AT_TOP,
-                PacketType.BALANCED: EventType.BALANCED_HOVERS_AT_TOP,
-            }
-
-            self.rec_evt(evt_type_mapping[packet_type])
-
-        #if packet_type == PacketType.BALANCED:
-        #    self._lift_unbalanced_heads_to_balanced_top()
+        # lane enforces: merge touching or lower
+        self.energy_packets[packet_type].append_packet(energy_packet.lift_to(top_blc))
 
 
     @phasepair_invariants
@@ -541,49 +727,34 @@ class PhasePair:
         """
         Will pop the first packet of a given type.
         """
-        pkt = self.energy_packets[packet_type].popleft()
-
-        if DEBUG_LOG:
-            print(f'[{self.ID}] First {packet_type.name} packet removed. New packet count is {self.n_packets[packet_type]}')
-
-        if REC_EVTS:
-            evt_type_mapping = {
-                PacketType.EXCESS: EventType.POP_LEFT_EXCESS,
-                PacketType.DEFICIT: EventType.POP_LEFT_DEFICIT,
-                PacketType.BALANCED: EventType.POP_LEFT_BALANCED,
-            }
-            self.rec_evt(evt_type_mapping[packet_type])
-        return pkt
-
+        return self.energy_packets[packet_type].pop_left()
 
     @phasepair_invariants
     def pop_packet(self, packet_type: PacketType):
         """
         Will pop the last packet of a given type.
         """
-        pkt = self.energy_packets[packet_type].pop()
+        return self.energy_packets[packet_type].pop_right()
 
-        if DEBUG_LOG:
-            print(f'[{self.ID}] Last {packet_type.name} packet removed. New packet count is {self.n_packets[packet_type]}')
+    @staticmethod
+    def _rec_evt_balance_packets(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if REC_EVTS:
+                self.rec_evt(EventType.BALANCED_PHASE)
 
-        if REC_EVTS:
-            evt_type_mapping = {
-                PacketType.EXCESS: EventType.POP_EXCESS,
-                PacketType.DEFICIT: EventType.POP_DEFICIT,
-                PacketType.BALANCED: EventType.POP_BALANCED,
-            }
-            self.rec_evt(evt_type_mapping[packet_type])
-        return pkt
+            res = func(self, *args, **kwargs)
+
+            return res
+
+        return wrapper
 
 
+    @_rec_evt_balance_packets
     @phasepair_invariants
     def balance_packets(self):
-        if REC_EVTS:
-            self.rec_evt(EventType.BALANCED_PHASE)
-
         while self.phase_type == PacketType.UNDEFINED:
             self.balance_first_packet()
-            if DEBUG_LOG: print('')
 
 
     def balance_first_packet(self):
@@ -591,46 +762,35 @@ class PhasePair:
         Take the first packets of the EXCESS and DEFICIT type, determines the residual, adds the BALANCED part and puts the residual back into the appropriate deque.
         """
 
-        pkt_exs = self.pop_packet_left(PacketType.EXCESS)
-        pkt_def = self.pop_packet_left(PacketType.DEFICIT)
+        pkt_exs = self.energy_packets[PacketType.EXCESS].peek_left()
+        pkt_def = self.energy_packets[PacketType.DEFICIT].peek_left()
+
         if DEBUG_LOG: print(f'[{self.ID}] Balancing EXCESS {pkt_exs} and DEFICIT {pkt_def}')
 
         # 1. Align Capacities (Lift the lower one to the higher one)
-        # Note: We rely on _absorb_front_overlaps to handle the consequences of lifting
-        if pkt_exs.capacity < pkt_def.capacity:
-            if DEBUG_LOG:
-                print(f'[{self.ID}] EXCESS below DEFICIT -> increased the EXCESS packets capacity')
-
-            if REC_EVTS:
-                self.rec_evt(EventType.EXCESS_BELOW_DEFICIT)
-
-            pkt_exs.capacity = pkt_def.capacity
-            pkt_exs = self._absorb_front_overlaps(PacketType.EXCESS, pkt_exs)
-        elif pkt_def.capacity < pkt_exs.capacity:
-            if DEBUG_LOG:
-                print(f'[{self.ID}] DEFICIT below EXCESS -> increased the DEFICIT packets capacity')
-
-            if REC_EVTS:
-                self.rec_evt(EventType.DEFICIT_BELOW_EXCESS)
-
-            pkt_def.capacity = pkt_exs.capacity
-            pkt_def = self._absorb_front_overlaps(PacketType.DEFICIT, pkt_def)
+        capacity_bottom = max(pkt_exs.capacity, pkt_def.capacity)
+        pkt_exs = self.energy_packets[PacketType.EXCESS].lift_front_to(capacity_bottom).peek_left()
+        pkt_def = self.energy_packets[PacketType.DEFICIT].lift_front_to(capacity_bottom).peek_left()
 
         # 2. Calculate Energy Difference
         # diff > 0: Deficit is larger (Residual is Deficit)
         # diff < 0: Excess is larger (Residual is Excess)
         diff = pkt_def.energy - pkt_exs.energy
 
-        # 3. Create Balanced Packet (using the Deficit packet as container)
+        # 4. Create Balanced Packet (using the Deficit packet as container)
         # The balanced amount is the min energy of both.
-        balanced_energy = min(pkt_exs.energy, pkt_def.energy)
+        pkt_balanced = EnergyPacket(
+            capacity=capacity_bottom,
+            energy=min(pkt_exs.energy, pkt_def.energy)
+        )
 
-        # We can reuse pkt_def for the balanced result to save an allocation
-        pkt_balanced = pkt_def
-        pkt_balanced.energy = balanced_energy
-        # capacity is already aligned from Step 1
+        # 3. Handle Residuals
+        if diff > -EPS:
+            self.energy_packets[PacketType.EXCESS].pop_left()
 
-        # 4. Handle Residuals
+        if diff < EPS:
+            self.energy_packets[PacketType.DEFICIT].pop_left()
+
         if diff > EPS:
             # Deficit was larger; Excess is fully consumed.
             # We need to put the remaining Deficit back.
@@ -642,8 +802,8 @@ class PhasePair:
             if REC_EVTS:
                 self.rec_evt(EventType.DEFICIT_REMAINING)
 
-            pkt_residual = EnergyPacket(capacity=pkt_balanced.capacity_max, energy=diff)
-            self.append_packet_left(PacketType.DEFICIT, pkt_residual)
+            pkt_def.energy = diff
+            self.energy_packets[PacketType.DEFICIT].lift_front_to(pkt_balanced.capacity_max)
 
         elif diff < -EPS:
             # Excess was larger; Deficit is fully consumed.
@@ -653,10 +813,10 @@ class PhasePair:
             if REC_EVTS:
                 self.rec_evt(EventType.EXCESS_REMAINING)
 
-            pkt_residual = EnergyPacket(capacity=pkt_balanced.capacity_max, energy=-diff)
-            self.append_packet_left(PacketType.EXCESS, pkt_residual)
+            pkt_exs.energy = -diff
+            self.energy_packets[PacketType.EXCESS].lift_front_to(pkt_balanced.capacity_max)
 
-        # 5. Store Balanced
+
         self.append_packet(PacketType.BALANCED, pkt_balanced)
 
 
@@ -727,14 +887,14 @@ class PhaseGroup:
         if self.group_type == PacketType.BALANCED:
             self.shift_inputs = [ShiftInput(
                 index=None,
-                capacity_hurdle=ctx.phase_pairs[self.index_start].energy_packets[PacketType.BALANCED][-1].capacity_max
+                capacity_hurdle=ctx.phase_pairs[self.index_start].energy_packets[PacketType.BALANCED].peek_right().capacity_max
             )]
             if REC_EVTS:
                 self.rec_evt(EventType.BALANCE_CREATES_HURDLE)
         else:
             self.shift_inputs = [ShiftInput(
                 index=self.index_start,
-                capacity_hurdle=0#ctx.phase_pairs[self.index_start].energy_packets[self.group_type][0].capacity
+                capacity_hurdle=0
             )]
 
 
@@ -901,7 +1061,7 @@ class PhaseGroup:
                     }
                     self.rec_evt(evt_mapping[self.group_type])
 
-                if pkt.capacity < capacity_hurdle - EPS:
+                if pkt.starts_below_level(capacity_hurdle):
                     if DEBUG_LOG:
                         print(f'[{self.ID}] Packet jumped over hurdle {capacity_hurdle} -> increase packets capacity')
 
@@ -912,7 +1072,7 @@ class PhaseGroup:
                         }
                         self.rec_evt(evt_mapping[self.group_type])
 
-                    pkt.capacity = capacity_hurdle
+                    pkt.lift_to(capacity_hurdle)
 
                 phase_pair_target.append_packet(self.group_type, pkt)
 
@@ -1135,7 +1295,7 @@ class Context:
     def _pp_get_pkts(pp: PhasePair, tp: PacketType):
         # Backward-compatible: missing BALANCED -> empty deque
         try:
-            return pp.energy_packets[tp]
+            return pp.energy_packets[tp].dq
         except KeyError:
             return deque()
 
@@ -1649,21 +1809,21 @@ The end result will be:
   with the final hurdle recorded as `51` at shift index `6`.
 
 The end result will be:
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-PG    |                                                            15..5 BAL                                                            ||                                6..10 EXC                                 ||                       11..14 BAL                       |
-H     |                                                                                                                                 ||       51        |                                                        ||                                                        |
-SI    |                                                                                                                                 ||        6        |                                                        ||                                                        |
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-PP    |     15      |     16      |     17      |      0       |      1      |      2       |      3       |      4       |      5      ||        6        |      7       |      8      |      9      |     10      ||     11      |     12      |      13      |     14      |
-PT    | e |  b  | d | e |  b  | d | e |  b  | d | e |  b   | d | e |  b  | d | e |  b   | d | e |  b   | d | e |  b   | d | e |  b  | d ||  e   |  b   | d | e |  b   | d | e |  b  | d | e |  b  | d | e |  b  | d || e |  b  | d | e |  b  | d | e |  b   | d | e |  b  | d |
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-n     | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1   | 0 | 0 |  1   | 0 | 0 |  1  | 0 ||  1   |  4   | 0 | 0 |  1   | 0 | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1  | 0 || 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1  | 0 |
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-ep[0] |   | 0,2 |   |   | 0,1 |   |   | 0,5 |   |   | 0,42 |   |   | 0,3 |   |   | 0,10 |   |   | 0,20 |   |   | 0,60 |   |   | 0,2 |   || 51,2 | 0,1  |   |   | 0,10 |   |   | 0,2 |   |   | 0,5 |   |   | 0,2 |   ||   | 0,5 |   |   | 0,1 |   |   | 0,50 |   |   | 0,1 |   |
-ep[1] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 2,1  |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
-ep[2] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 42,4 |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
-ep[3] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 50,1 |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+PG    |                                                            16..5 BAL                                                            ||                                        6..11 EXC                                        ||                       12..15 BAL                       |
+H     |                                                                                                                                 ||        0        |                                                                       ||                                                        |
+SI    |                                                                                                                                 ||        6        |                                                                       ||                                                        |
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+PP    |     16      |     17      |     18      |      0       |      1      |      2       |      3       |      4       |      5      ||        6        |      7       |      8       |      9      |     10      |     11      ||     12      |     13      |      14      |     15      |
+PT    | e |  b  | d | e |  b  | d | e |  b  | d | e |  b   | d | e |  b  | d | e |  b   | d | e |  b   | d | e |  b   | d | e |  b  | d ||  e   |  b   | d | e |  b   | d | e |  b   | d | e |  b  | d | e |  b  | d | e |  b  | d || e |  b  | d | e |  b  | d | e |  b   | d | e |  b  | d |
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+n     | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1   | 0 | 0 |  1   | 0 | 0 |  1  | 0 ||  1   |  4   | 0 | 0 |  1   | 0 | 0 |  1   | 0 | 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1  | 0 || 0 |  1  | 0 | 0 |  1  | 0 | 0 |  1   | 0 | 0 |  1  | 0 |
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ep[0] |   | 0,2 |   |   | 0,1 |   |   | 0,4 |   |   | 0,11 |   |   | 0,1 |   |   | 0,20 |   |   | 0,30 |   |   | 0,40 |   |   | 0,3 |   || 71,2 | 0,1  |   |   | 0,50 |   |   | 0,60 |   |   | 0,1 |   |   | 0,5 |   |   | 0,3 |   ||   | 0,5 |   |   | 0,1 |   |   | 0,70 |   |   | 0,1 |   |
+ep[1] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 3,1  |   |   |      |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
+ep[2] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 60,2 |   |   |      |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
+ep[3] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |   |      |   |   |      |   |   |      |   |   |     |   ||      | 70,1 |   |   |      |   |   |      |   |   |     |   |   |     |   |   |     |   ||   |     |   |   |     |   |   |      |   |   |     |   |
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 """
 
     global DEBUG_LOG, CHECK_INVARIANTS
@@ -1676,7 +1836,7 @@ ep[3] |   |     |   |   |     |   |   |     |   |   |      |   |   |     |   |  
     result_ref = """
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 PG    |                                                            16..5 BAL                                                            ||                                        6..11 EXC                                        ||                       12..15 BAL                       |
-H     |                                                                                                                                 ||       71        |                                                                       ||                                                        |
+H     |                                                                                                                                 ||        0        |                                                                       ||                                                        |
 SI    |                                                                                                                                 ||        6        |                                                                       ||                                                        |
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 PP    |     16      |     17      |     18      |      0       |      1      |      2       |      3       |      4       |      5      ||        6        |      7       |      8       |      9      |     10      |     11      ||     12      |     13      |      14      |     15      |
@@ -1793,21 +1953,30 @@ def build_worst_case_cycle(
 
 
 
-if __name__ == '__main__':
-    n = 10000
-    ratio_balanced = 0.3
+
+
+
+
+import gc
+import math
+import time
+from dataclasses import dataclass
+from typing import Callable, Any, Tuple, List
+
+import numpy as np
+
+def init_random_ctx(n: int, ratio_balanced: float = 0.0) -> "Context":
+    import random
+    n = int(n)
     n_balanced = int(n * ratio_balanced)
     n_unbalanced = n - n_balanced
 
-    import random
-
-    def random_energy():
-        #return random.randint(1,100)
-        return random.random()*1000
+    def random_energy() -> float:
+        return random.random() * 1000.0
 
     blc = deque([random_energy() for _ in range(n_balanced)])
-    ex = deque([random_energy() for _ in range(n_unbalanced)])
-    de = deque([random_energy() for _ in range(n_unbalanced)])
+    ex  = deque([random_energy() for _ in range(n_unbalanced)])
+    de  = deque([random_energy() for _ in range(n_unbalanced)])
 
     while len(blc):
         insert = random.random() <= ratio_balanced
@@ -1818,24 +1987,171 @@ if __name__ == '__main__':
             ex.append(e)
             de.append(e)
 
+    # init produces the state for the timed function
     ctx = Context(energy_excess_per_phase_initial=ex, energy_deficit_per_phase_initial=de)
+    return ctx
+
+def init_neg_corr_ctx(n):
+    ex = np.linspace(1.0,1000.0, int(n))
+    de = ex[-1::-1]
+    # init produces the state for the timed function
+    ctx = Context(energy_excess_per_phase_initial=ex, energy_deficit_per_phase_initial=de)
+    return ctx
+
+def init_worst_case(n) -> Context:
+    ex, de = build_worst_case_cycle(int(n), base=100, e_low=30, e_high=40)
+    ctx = Context(energy_excess_per_phase_initial=ex, energy_deficit_per_phase_initial=de)
+    return ctx
+
+
+def run_ctx(ctx: "Context") -> None:
+    # THIS is what is timed (run-only)
     ctx.run_mEfES()
 
-    ex, de = build_worst_case_cycle(n, base=100, e_low=30, e_high=40)
 
-    ctx = Context(energy_excess_per_phase_initial=ex, energy_deficit_per_phase_initial=de)
+def run_complexity_benchmark():
+    @dataclass
+    class FitResult:
+        a: float
+        b: float
+        r2: float
+        n: np.ndarray
+        t: np.ndarray  # run-only median seconds per call
+
+    def _r2(y: np.ndarray, yhat: np.ndarray) -> float:
+        ss_res = np.sum((y - yhat) ** 2)
+        ss_tot = np.sum((y - np.mean(y)) ** 2)
+        return 1.0 - (ss_res / ss_tot if ss_tot > 0 else float("nan"))
+
+    def fit_powerlaw(n: np.ndarray, t: np.ndarray) -> Tuple[float, float, float]:
+        mask = t > 0
+        if np.count_nonzero(mask) < 2:
+            raise RuntimeError("Need at least 2 positive timing samples to fit a power law.")
+        x = np.log(n[mask])
+        y = np.log(t[mask])
+        b, loga = np.polyfit(x, y, deg=1)
+        a = float(np.exp(loga))
+        yhat = loga + b * x
+        return a, float(b), float(_r2(y, yhat))
+
+    def complexity_benchmark_run_only(
+            init_fn: Callable[[int], Any],
+            run_fn: Callable[[Any], None],
+            n_min: int = 10 ** 2,
+            n_max: int = 10 ** 5,
+            n_points: int = 12,
+            repeats: int = 9,
+            min_total_run_time: float = 0.25,
+            warmup: int = 1,
+            disable_gc: bool = True,
+            progress: bool = True,
+            print_every: int = 1,
+    ) -> FitResult:
+        """
+        Benchmarks RUN TIME ONLY for run_fn(state), while still calling init_fn(n) once per execution.
+        Prints running fit after each n (once >=2 timing points exist), if progress=True.
+        """
+        if n_min <= 0 or n_max <= 0 or n_min >= n_max:
+            raise ValueError("Require 0 < n_min < n_max.")
+        if n_points < 2:
+            raise ValueError("n_points must be >= 2.")
+        if repeats < 3:
+            raise ValueError("Use repeats>=3 for a stable median.")
+
+        n_vals = np.unique(np.round(np.logspace(math.log10(n_min), math.log10(n_max), n_points)).astype(int))
+        t_vals: List[float] = []
+
+        def run_only_loops(n: int, loops: int) -> float:
+            """Total RUN time over `loops` executions (init called each time, not timed)."""
+            if disable_gc:
+                gc_was_enabled = gc.isenabled()
+                gc.disable()
+            try:
+                total = 0.0
+                for _ in range(loops):
+                    state = init_fn(n)  # NOT timed
+                    t0 = time.perf_counter()
+                    run_fn(state)  # timed
+                    total += (time.perf_counter() - t0)
+                return total
+            finally:
+                if disable_gc and gc_was_enabled:
+                    gc.enable()
+
+        # Warmup (not recorded)
+        for _ in range(max(0, warmup)):
+            s = init_fn(int(n_vals[0]))
+            run_fn(s)
+
+        for i, n in enumerate(n_vals):
+            # probe one-call run time (init excluded from probe timing too)
+            probe = [run_only_loops(int(n), loops=1) for _ in range(3)]
+            one_call = float(np.median(probe))
+            loops = 10_000 if one_call <= 0.0 else max(1, int(math.ceil(min_total_run_time / one_call)))
+
+            per_call_samples = []
+            for _ in range(repeats):
+                total_run = run_only_loops(int(n), loops=loops)
+                per_call_samples.append(total_run / loops)
+
+            t_med = float(np.median(per_call_samples))
+            t_vals.append(t_med)
+
+            # Running fit + print
+            if progress and ((i + 1) % print_every == 0):
+                n_arr = np.array(n_vals[: i + 1], dtype=float)
+                t_arr = np.array(t_vals, dtype=float)
+
+                if len(t_arr) >= 2 and np.all(t_arr > 0):
+                    a, b, r2 = fit_powerlaw(n_arr, t_arr)
+                    print(
+                        f"FitResults for n in range {int(n_arr[0])} to {int(n_arr[-1])} "
+                        f"({len(n_arr)} pts): a={a:.6e}, b={b:.6f}, R²={r2:.6f} | "
+                        f"last: n={int(n)}, t={t_med:.6e}s"
+                    )
+                else:
+                    print(
+                        f"Collected {len(t_arr)} point(s) so far; need >=2 for fit. "
+                        f"last: n={int(n)}, t={t_med:.6e}s"
+                    )
+
+        n_arr = np.array(n_vals, dtype=float)
+        t_arr = np.array(t_vals, dtype=float)
+        a, b, r2 = fit_powerlaw(n_arr, t_arr)
+        return FitResult(a=a, b=b, r2=r2, n=n_arr, t=t_arr)
+
+    res = complexity_benchmark_run_only(
+        init_fn=lambda n: init_random_ctx(n, ratio_balanced=0.0),
+        # init_fn=lambda n: init_neg_corr_ctx(n),
+        run_fn=run_ctx,
+        n_min=10 ** 2,
+        n_max=10 ** 7,
+        n_points=12,
+        repeats=5,
+        min_total_run_time=0.0001,
+        warmup=2,
+        disable_gc=True,
+    )
+
+    print("Fit: t(n) ≈ a * n^b   (RUN-ONLY; init excluded)")
+    print(f"a  = {res.a:.6e}")
+    print(f"b  = {res.b:.6f}")
+    print(f"R² = {res.r2:.6f}")
+    print("\nSamples (median seconds per call, run-only):")
+    for n, t in zip(res.n.astype(int), res.t):
+        print(f"n={n:>7d}  t={t:.6e}")
+
+
+def run_worst_case(n):
+    ctx = init_worst_case(n)
     ctx.run_mEfES()
 
-    run_example()
 
-    print('Finished')
-    #print(EventRecorder().print_events(show_all=True))
 
-    evts = EventRecorder().observed_events_in_order
-    for i in range(len(evts)):
-        if evts[i].evt_type.endswith('RAISED_TO_BALANCED_TOP') and evts[i-1].evt_type == EventType.APPEND_BALANCED.name:
-            print(f'{evts[i].evt_type} after {evts[i-1].evt_type}')
+if __name__ == "__main__":
 
-        if 'ABSORBED_AT_FRONT' in evts[i].evt_type:
-            print(f'{evts[i].evt_type} after {evts[i-1].evt_type} after {evts[i-2].evt_type} after {evts[i-3].evt_type}')
-            #'APPEND_LEFT' in evts[i-1].evt_type and
+    #run_example()
+    #run_worst_case(n=1000)
+
+    run_complexity_benchmark()
+
