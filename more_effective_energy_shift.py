@@ -368,11 +368,11 @@ class EnergyPacketLane:
     @staticmethod
     def _log_append_packet(func: Callable) -> Callable:
         @wraps(func)
-        def wrapper(self, pkt: EnergyPacket, *args, **kwargs):
+        def wrapper(self, energy_packet: EnergyPacket, *args, **kwargs):
             if DEBUG_LOG:
-                print(f'[{self.ID}] Appending packet: {pkt}')
+                print(f'[{self.ID}] Appending packet: {energy_packet}')
 
-            res = func(self, pkt, *args, **kwargs)
+            res = func(self, energy_packet, *args, **kwargs)
 
             if REC_EVTS:
                 evt_type_mapping = {
@@ -389,7 +389,7 @@ class EnergyPacketLane:
     @staticmethod
     def _rec_evt_append_packet(func: Callable) -> Callable:
         @wraps(func)
-        def wrapper(self, pkt: EnergyPacket, *args, **kwargs):
+        def wrapper(self, energy_packet: EnergyPacket, *args, **kwargs):
             if REC_EVTS:
                 evt_type_mapping = {
                     PacketType.EXCESS: EventType.APPEND_EXCESS,
@@ -398,7 +398,7 @@ class EnergyPacketLane:
                 }
                 self.rec_evt(evt_type_mapping[self.lane_type])
 
-            res = func(self, pkt, *args, **kwargs)
+            res = func(self, energy_packet, *args, **kwargs)
 
             if REC_EVTS:
                 evt_type_mapping = {
@@ -414,7 +414,7 @@ class EnergyPacketLane:
 
     @_rec_evt_append_packet
     @_log_append_packet
-    def append_packet(self, pkt: EnergyPacket) -> 'EnergyPacketLane':
+    def append_packet(self, energy_packet: EnergyPacket) -> 'EnergyPacketLane':
         """
         Tail-append:
           - merges touching (within EPS)
@@ -422,33 +422,26 @@ class EnergyPacketLane:
           - raises if start order goes backwards
         """
         if not self.dq:
-            self.dq.append(pkt)
+            self.dq.append(energy_packet)
             return self
 
         last = self.dq[-1]
 
-        #if pkt.start + EPS < last.end:
-        #    pkt.start = last.start
-            #raise PacketOrderError(f"Tail append out-of-order: {pkt.start} < {last.start}")
-
-        #if last.overlaps_strictly_with(pkt):
-            #raise PacketOverlapError(f"Tail append strict overlap: last={last}, pkt={pkt}")
-
-        if pkt.starts_below_level(last.end) or pkt.contact_with(last):
-            last.energy += pkt.energy
+        if energy_packet.starts_below_level(last.end) or energy_packet.contact_with(last):
+            last.energy += energy_packet.energy
             return self
 
-        self.dq.append(pkt)
+        self.dq.append(energy_packet)
 
         return self
 
     @staticmethod
     def _log_append_packet_left(func: Callable) -> Callable:
         @wraps(func)
-        def wrapper(self, pkt: EnergyPacket, *args, **kwargs):
+        def wrapper(self, energy_packet: EnergyPacket, *args, **kwargs):
             if DEBUG_LOG:
-                print(f'[{self.ID}] Appending packet left: {pkt}')
-            res = func(self, pkt, *args, **kwargs)
+                print(f'[{self.ID}] Appending packet left: {energy_packet}')
+            res = func(self, energy_packet, *args, **kwargs)
             if DEBUG_LOG:
                 print(f'[{self.ID}] Packet appended left. New packet count is {len(self)}')
             return res
@@ -458,7 +451,7 @@ class EnergyPacketLane:
     @staticmethod
     def _rec_evt_append_packet_left(func: Callable) -> Callable:
         @wraps(func)
-        def wrapper(self, pkt: EnergyPacket, *args, **kwargs):
+        def wrapper(self, energy_packet: EnergyPacket, *args, **kwargs):
             if REC_EVTS:
                 evt_type_mapping = {
                     PacketType.EXCESS: EventType.APPEND_LEFT_EXCESS,
@@ -467,7 +460,7 @@ class EnergyPacketLane:
                 }
                 self.rec_evt(evt_type_mapping[self.lane_type])
 
-            res = func(self, pkt, *args, **kwargs)
+            res = func(self, energy_packet, *args, **kwargs)
 
             if REC_EVTS:
                 evt_type_mapping = {
@@ -483,28 +476,28 @@ class EnergyPacketLane:
 
     @_rec_evt_append_packet_left
     @_log_append_packet_left
-    def append_packet_left(self, pkt: EnergyPacket) -> 'EnergyPacketLane':
+    def append_packet_left(self, energy_packet: EnergyPacket) -> 'EnergyPacketLane':
         """
         Left-append with canonicalization:
           - absorb any head packets with lower start
-          - absorb any head packets that touch/overlap pkt after it grows
+          - absorb any head packets that touch/overlap energy_packet after it grows
         """
 
-        # absorb packets starting below pkt.start
-        while self.dq and (self.dq[0].start + EPS < pkt.start):
+        # absorb packets starting below energy_packet.start
+        while self.dq and (self.dq[0].start + EPS < energy_packet.start):
             lower = self.dq.popleft()
-            pkt.energy += lower.energy
+            energy_packet.energy += lower.energy
 
-        # absorb packets that now touch/overlap pkt
-        while self.dq and pkt.overlaps_with(self.dq[0]):
+        # absorb packets that now touch/overlap energy_packet
+        while self.dq and energy_packet.overlaps_with(self.dq[0]):
             nxt = self.dq.popleft()
-            pkt.energy += nxt.energy
+            energy_packet.energy += nxt.energy
 
         # safety: must not leave a strict overlap at the boundary
-        if self.dq and pkt.overlaps_strictly_with(self.dq[0]):
-            raise PacketOverlapError(f"Left append left strict overlap remained: pkt={pkt}, next={self.dq[0]}")
+        if self.dq and energy_packet.overlaps_strictly_with(self.dq[0]):
+            raise PacketOverlapError(f"Left append left strict overlap remained: energy_packet={energy_packet}, next={self.dq[0]}")
 
-        self.dq.appendleft(pkt)
+        self.dq.appendleft(energy_packet)
 
         return self
 
@@ -535,7 +528,7 @@ class EnergyPacketLane:
         return self
 
 
-def phasepair_invariants(method: Callable[P, R]) -> Callable[P, R]:
+def check_invariants(method: Callable[P, R]) -> Callable[P, R]:
     """
     Minimal decorator for PhasePair instance methods.
 
@@ -693,20 +686,26 @@ class PhasePair:
     def lift_head_to(self, packet_type: PacketType, level: float) -> None:
         self.energy_packets[packet_type].lift_front_to(level)
 
-    @phasepair_invariants
+    @check_invariants
+    def enforce_above_balanced(self, energy_packet: EnergyPacket):
+        # enforce "above balanced top" (if required)
+        top_blc = self._balanced_top()
+        energy_packet.lift_to(top_blc)
+        return energy_packet
+
+    @check_invariants
     def append_packet_left(self, packet_type: PacketType, energy_packet: EnergyPacket):
         """
         Append a packet of a given type to the left of the appropriate list.
         Asserts that the packet will conserve the canonical order of capacities compared to the BALANCED one and the list of same type.
         """
         # enforce "above balanced top" (if required)
-        top_blc = self._balanced_top()
-
+        energy_packet = self.enforce_above_balanced(energy_packet)
         # canonicalization happens in the lane (absorbs lower-start & overlaps)
-        self.energy_packets[packet_type].append_packet_left(energy_packet.lift_to(top_blc))
+        self.energy_packets[packet_type].append_packet_left(energy_packet)
 
 
-    @phasepair_invariants
+    @check_invariants
     def append_packet(self, packet_type: PacketType, energy_packet: EnergyPacket ):
         """
         Append a packet of a given type to the appropriate list.
@@ -716,20 +715,20 @@ class PhasePair:
         """
 
         # enforce "above balanced top"
-        top_blc = self._balanced_top()
-
+        energy_packet = self.enforce_above_balanced(energy_packet)
         # lane enforces: merge touching or lower
-        self.energy_packets[packet_type].append_packet(energy_packet.lift_to(top_blc))
+        self.energy_packets[packet_type].append_packet(energy_packet)
 
 
-    @phasepair_invariants
+    @check_invariants
     def pop_packet_left(self, packet_type: PacketType):
         """
         Will pop the first packet of a given type.
         """
         return self.energy_packets[packet_type].pop_left()
 
-    @phasepair_invariants
+
+    @check_invariants
     def pop_packet(self, packet_type: PacketType):
         """
         Will pop the last packet of a given type.
@@ -751,7 +750,7 @@ class PhasePair:
 
 
     @_rec_evt_balance_packets
-    @phasepair_invariants
+    @check_invariants
     def balance_packets(self):
         while self.phase_type == PacketType.UNDEFINED:
             self.balance_first_packet()
@@ -762,39 +761,30 @@ class PhasePair:
         Take the first packets of the EXCESS and DEFICIT type, determines the residual, adds the BALANCED part and puts the residual back into the appropriate deque.
         """
 
-        pkt_exs = self.energy_packets[PacketType.EXCESS].peek_left()
-        pkt_def = self.energy_packets[PacketType.DEFICIT].peek_left()
+        energy_packet_exs = self.energy_packets[PacketType.EXCESS].pop_left()
+        energy_packet_def = self.energy_packets[PacketType.DEFICIT].pop_left()
 
-        if DEBUG_LOG: print(f'[{self.ID}] Balancing EXCESS {pkt_exs} and DEFICIT {pkt_def}')
+        if DEBUG_LOG: print(f'[{self.ID}] Balancing EXCESS {energy_packet_exs} and DEFICIT {energy_packet_def}')
 
         # 1. Align Capacities (Lift the lower one to the higher one)
-        capacity_bottom = max(pkt_exs.capacity, pkt_def.capacity)
-        pkt_exs = self.energy_packets[PacketType.EXCESS].lift_front_to(capacity_bottom).peek_left()
-        pkt_def = self.energy_packets[PacketType.DEFICIT].lift_front_to(capacity_bottom).peek_left()
+        capacity_bottom = max(energy_packet_exs.capacity, energy_packet_def.capacity)
+        energy_packet_exs = energy_packet_exs.lift_to(capacity_bottom)
+        energy_packet_def = energy_packet_def.lift_to(capacity_bottom)
 
         # 2. Calculate Energy Difference
         # diff > 0: Deficit is larger (Residual is Deficit)
         # diff < 0: Excess is larger (Residual is Excess)
-        diff = pkt_def.energy - pkt_exs.energy
+        diff = energy_packet_def.energy - energy_packet_exs.energy
 
         # 4. Create Balanced Packet (using the Deficit packet as container)
         # The balanced amount is the min energy of both.
-        pkt_balanced = EnergyPacket(
-            capacity=capacity_bottom,
-            energy=min(pkt_exs.energy, pkt_def.energy)
-        )
-
+        energy_balanced = min(energy_packet_exs.energy, energy_packet_def.energy)
+        energy_packet_bal = energy_packet_def
         # 3. Handle Residuals
-        if diff > -EPS:
-            self.energy_packets[PacketType.EXCESS].pop_left()
-
-        if diff < EPS:
-            self.energy_packets[PacketType.DEFICIT].pop_left()
-
         if diff > EPS:
             # Deficit was larger; Excess is fully consumed.
             # We need to put the remaining Deficit back.
-            # We can create a new packet or reuse pkt_exs if we wanted,
+            # We can create a new packet or reuse energy_packet_exs if we wanted,
             # but creating new for residual is cleaner for ownership.
             if DEBUG_LOG:
                 print(f'[{self.ID}] DEFICIT remaining')
@@ -802,22 +792,25 @@ class PhasePair:
             if REC_EVTS:
                 self.rec_evt(EventType.DEFICIT_REMAINING)
 
-            pkt_def.energy = diff
-            self.energy_packets[PacketType.DEFICIT].lift_front_to(pkt_balanced.capacity_max)
-
+            energy_packet_def.energy = diff
+            energy_packet_def.lift_to(energy_packet_exs.capacity_max)
+            self.energy_packets[PacketType.DEFICIT].append_packet_left(energy_packet_def)
+            energy_packet_bal = energy_packet_exs
         elif diff < -EPS:
             # Excess was larger; Deficit is fully consumed.
+
             if DEBUG_LOG:
                 print(f'[{self.ID}] EXCESS remaining')
 
             if REC_EVTS:
                 self.rec_evt(EventType.EXCESS_REMAINING)
 
-            pkt_exs.energy = -diff
-            self.energy_packets[PacketType.EXCESS].lift_front_to(pkt_balanced.capacity_max)
+            energy_packet_exs.energy = -diff
+            energy_packet_exs.lift_to(energy_packet_def.capacity_max)
+            self.energy_packets[PacketType.EXCESS].append_packet_left(energy_packet_exs)
 
+        self.energy_packets[PacketType.BALANCED].append_packet(energy_packet_bal)
 
-        self.append_packet(PacketType.BALANCED, pkt_balanced)
 
 
 @dataclass
@@ -1049,10 +1042,10 @@ class PhaseGroup:
 
                 if DEBUG_LOG: print(f'\n[{self.ID}] Shift needed for {phase_pair_source.n_packets[self.group_type]} packet(s).')
 
-                pkt = phase_pair_source.pop_packet_left(self.group_type)
+                energy_packet = phase_pair_source.pop_packet_left(self.group_type)
 
                 if DEBUG_LOG:
-                    print(f'[{self.ID}] Shifting {pkt}')
+                    print(f'[{self.ID}] Shifting {energy_packet}')
 
                 if REC_EVTS:
                     evt_mapping = {
@@ -1061,7 +1054,7 @@ class PhaseGroup:
                     }
                     self.rec_evt(evt_mapping[self.group_type])
 
-                if pkt.starts_below_level(capacity_hurdle):
+                if energy_packet.starts_below_level(capacity_hurdle):
                     if DEBUG_LOG:
                         print(f'[{self.ID}] Packet jumped over hurdle {capacity_hurdle} -> increase packets capacity')
 
@@ -1072,9 +1065,9 @@ class PhaseGroup:
                         }
                         self.rec_evt(evt_mapping[self.group_type])
 
-                    pkt.lift_to(capacity_hurdle)
+                    energy_packet.lift_to(capacity_hurdle)
 
-                phase_pair_target.append_packet(self.group_type, pkt)
+                phase_pair_target.append_packet(self.group_type, energy_packet)
 
             if DEBUG_LOG: print('')
 
@@ -1098,6 +1091,24 @@ class Context:
 
     def rec_evt(self, evt_type: EventType | str):
         EventRecorder().record(Event(evt_type=evt_type, triggered_by='ctx'))
+
+    def _check_invariants(self):
+        energy_excess_total = sum(self.energy_excess_per_phase_initial)
+        energy_deficit_total = sum(self.energy_deficit_per_phase_initial)
+
+        energy_excess_in_packets = 0
+        energy_deficit_in_packets = 0
+        for phase_pair in self.phase_pairs:
+            energy_exs = sum([ep.energy for ep in phase_pair.energy_packets[PacketType.EXCESS]])
+            energy_def = sum([ep.energy for ep in phase_pair.energy_packets[PacketType.DEFICIT]])
+            energy_bal = sum([ep.energy for ep in phase_pair.energy_packets[PacketType.BALANCED]])
+
+            energy_excess_in_packets += energy_exs + energy_bal
+            energy_deficit_in_packets += energy_def + energy_bal
+
+        print(f'Energy difference EXCESS = {energy_excess_in_packets-energy_excess_total}')
+        print(f'Energy difference DEFICIT = {energy_deficit_in_packets - energy_deficit_total}')
+
 
     @property
     def done(self):
@@ -1137,23 +1148,46 @@ class Context:
         ) for index_phase in range(self.N_phases)])
 
 
+    @staticmethod
+    def _log_balance(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if DEBUG_LOG:
+                print("vvvvvvvvvvvvvvvvv BALANCE vvvvvvvvvvvvvvvvv")
+                print(self.format_phase_table_console())
+
+            res = func(self, *args, **kwargs)
+
+            if DEBUG_LOG:
+                print(self.format_phase_table_console())
+                print("^^^^^^^^^^^^^^^^^^ BALANCE ^^^^^^^^^^^^^^^^^^")
+            return res
+
+        return wrapper
+
+    @staticmethod
+    def _rec_evt_balance(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if REC_EVTS:
+                self.rec_evt(EventType.BALANCE_STEP)
+
+            res = func(self, *args, **kwargs)
+
+            return res
+
+        return wrapper
+
+
+    @_rec_evt_balance
+    @_log_balance
+    @check_invariants
     def balance(self):
         assert not self.done
-
-        if DEBUG_LOG:
-            print(f'vvvvvvvvvvvvvvvvv BALANCE vvvvvvvvvvvvvvvvv')
-            print(self.format_phase_table_console())
-
-        if REC_EVTS:
-            self.rec_evt(EventType.BALANCE_STEP)
 
         for phase_group in self.phase_groups:
             if DEBUG_LOG: print('\n----')
             phase_group.balance_group(self)
-
-        if DEBUG_LOG:
-            print(self.format_phase_table_console())
-            print(f'^^^^^^^^^^^^^^^^^^ BALANCE ^^^^^^^^^^^^^^^^^^')
 
 
     def rotate_groups_to_anchor(self) -> None:
@@ -1164,20 +1198,44 @@ class Context:
                     if DEBUG_LOG: print(f'Rotating phase groups by {-k}.')
                 return
 
+    @staticmethod
+    def _log_merge_groups(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if DEBUG_LOG:
+                print("vvvvvvvvvvvvvvvvv MERGE vvvvvvvvvvvvvvvvv")
+                print(self.format_phase_table_console())
 
+            res = func(self, *args, **kwargs)
+
+            if DEBUG_LOG:
+                print(self.format_phase_table_console())
+                print("^^^^^^^^^^^^^^^^^^ MERGE ^^^^^^^^^^^^^^^^^^")
+            return res
+
+        return wrapper
+
+    @staticmethod
+    def _rec_evt_merge_groups(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if REC_EVTS:
+                self.rec_evt(EventType.MERGE_STEP)
+
+            res = func(self, *args, **kwargs)
+
+            return res
+
+        return wrapper
+
+    @_rec_evt_merge_groups
+    @_log_merge_groups
     def merge_groups(self) -> None:
         assert not self.done
 
         dq = self.phase_groups
         if len(dq) < 2:
             return
-
-        if DEBUG_LOG:
-            print("vvvvvvvvvvvvvvvvv MERGE vvvvvvvvvvvvvvvvv")
-            print(self.format_phase_table_console())
-
-        if REC_EVTS:
-            self.rec_evt(EventType.MERGE_STEP)
 
         # Canonicalize rotation for determinism
         self.rotate_groups_to_anchor()
@@ -1237,28 +1295,46 @@ class Context:
         # Canonicalize rotation for determinism
         self.rotate_groups_to_anchor()
 
-        if DEBUG_LOG:
-            print(self.format_phase_table_console())
-            print("^^^^^^^^^^^^^^^^^^ MERGE (stack) ^^^^^^^^^^^^^^^^^^")
+    @staticmethod
+    def _log_shift_groups(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if DEBUG_LOG:
+                print("vvvvvvvvvvvvvvvvv SHIFT vvvvvvvvvvvvvvvvv")
+                print(self.format_phase_table_console())
 
+            res = func(self, *args, **kwargs)
 
+            if DEBUG_LOG:
+                print(self.format_phase_table_console())
+                print("^^^^^^^^^^^^^^^^^^ SHIFT ^^^^^^^^^^^^^^^^^^")
+            return res
+
+        return wrapper
+
+    @staticmethod
+    def _rec_evt_shift_groups(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if REC_EVTS:
+                self.rec_evt(EventType.SHIFT_STEP)
+
+            res = func(self, *args, **kwargs)
+            return res
+
+        return wrapper
+
+    @_rec_evt_shift_groups
+    @_log_shift_groups
+    @check_invariants
     def shift_groups(self):
         assert not self.done
         """Iterate over all phase_groups and shift EXCESS groups to the next DEFICIT group"""
-        if DEBUG_LOG:
-            print("vvvvvvvvvvvvvvvvv SHIFT vvvvvvvvvvvvvvvvv")
-            print(self.format_phase_table_console())
-
-        if REC_EVTS:
-            self.rec_evt(EventType.SHIFT_STEP)
 
         for grp in self.phase_groups:
             if DEBUG_LOG: print('\n----')
             grp.shift(self)
 
-        if DEBUG_LOG:
-            print(self.format_phase_table_console())
-            print(f'^^^^^^^^^^^^^^^^^^ SHIFT ^^^^^^^^^^^^^^^^^^')
 
 
     def run_mEfES(self):
@@ -1292,7 +1368,7 @@ class Context:
     PHASE_COL_TYPES = (PacketType.EXCESS, PacketType.BALANCED, PacketType.DEFICIT)
 
     @staticmethod
-    def _pp_get_pkts(pp: PhasePair, tp: PacketType):
+    def _pp_get_energy_packets(pp: PhasePair, tp: PacketType):
         # Backward-compatible: missing BALANCED -> empty deque
         try:
             return pp.energy_packets[tp].dq
@@ -1321,8 +1397,8 @@ class Context:
 
 
     @staticmethod
-    def _fmt_packet(pkt: EnergyPacket) -> str:
-        return f"{Context._fmt_num(pkt.capacity)},{Context._fmt_num(pkt.energy)}"
+    def _fmt_packet(energy_packet: EnergyPacket) -> str:
+        return f"{Context._fmt_num(energy_packet.capacity)},{Context._fmt_num(energy_packet.energy)}"
 
 
     @staticmethod
@@ -1423,14 +1499,14 @@ class Context:
         for i in phase_order:
             pp = self.phase_pairs[i]
             for tp in Context.PHASE_COL_TYPES:
-                max_k = max(max_k, len(Context._pp_get_pkts(pp, tp)))
+                max_k = max(max_k, len(Context._pp_get_energy_packets(pp, tp)))
 
         ep_rows: list[tuple[str, list[str]]] = []
         for k in range(max_k):
             row: list[str] = []
             for i, tp in col_specs:
-                pkts = Context._pp_get_pkts(self.phase_pairs[i], tp)
-                row.append(Context._fmt_packet(pkts[k]) if k < len(pkts) else "")
+                energy_packets = Context._pp_get_energy_packets(self.phase_pairs[i], tp)
+                row.append(Context._fmt_packet(energy_packets[k]) if k < len(energy_packets) else "")
             ep_rows.append((f"ep[{k}]", row))
 
         # widths derived from non-merged rows
@@ -1646,7 +1722,7 @@ class Context:
         for i in phase_order:
             pp = self.phase_pairs[i]
             for tp in Context.PHASE_COL_TYPES:
-                max_k = max(max_k, len(Context._pp_get_pkts(pp, tp)))
+                max_k = max(max_k, len(Context._pp_get_energy_packets(pp, tp)))
 
         def latex_row(label: str, cells: list[str]) -> str:
             return " & ".join([label] + cells) + r" \\"
@@ -1663,8 +1739,8 @@ class Context:
             for i in phase_order:
                 pp = self.phase_pairs[i]
                 for tp in Context.PHASE_COL_TYPES:
-                    pkts = Context._pp_get_pkts(pp, tp)
-                    cells.append(Context._fmt_packet(pkts[k]) if k < len(pkts) else "")
+                    energy_packets = Context._pp_get_energy_packets(pp, tp)
+                    cells.append(Context._fmt_packet(energy_packets[k]) if k < len(energy_packets) else "")
             rows.append(latex_row(f"ep[{k}]", cells))
 
         return "\n".join(rows)
@@ -2146,12 +2222,14 @@ def run_worst_case(n):
     ctx = init_worst_case(n)
     ctx.run_mEfES()
 
-
+def run_random(n):
+    ctx = init_random_ctx(n)
+    ctx.run_mEfES()
 
 if __name__ == "__main__":
 
-    #run_example()
+    run_example()
     #run_worst_case(n=1000)
-
-    run_complexity_benchmark()
+    #run_random(n=100000)
+    #run_complexity_benchmark()
 
