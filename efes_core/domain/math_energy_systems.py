@@ -1,6 +1,5 @@
 import numpy as np
-from typing import Union, Optional, List
-
+from typing import Union
 
 def get_used_generation_power(power_generation: Union[np.ndarray, float, int], power_demand: Union[np.ndarray, float, int], efficiency_direct_usage: float) -> Union[np.ndarray, float, int]:
     return np.clip(power_demand/efficiency_direct_usage, a_min=0, a_max=power_generation)
@@ -129,3 +128,4 @@ def calulate_production_to_demand_ratio(energy_generation: Union[float, np.ndarr
 def calculate_storage_to_demand_ratio(capacity: Union[float, np.ndarray], energy_demand_per_day_mean: float):
     """The storage to demand ratio (SDR) is calculated as the ratio of the storage capacity to the mean daily energy demand."""
     return capacity / energy_demand_per_day_mean
+

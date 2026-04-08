@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "effective-energy-shift"
+version = "1.0"
+description = """This module includes the Effective Energy Shift (EfES) and the more Effective Energy Shift (mEfES) algorithms.
+They can answer the question about the benefit of an increasing Energy Storage System (EES) size within micro grids.
+Inputs to both are, among other technical parameters, a power time series for the generation and one for the demand.
+While the EfES implementation scales linearly to quadratically with the input size, the mEfES implemention scales linearly for all cases.
+"""
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Jonathan Fellerer (AirborneKiwi)" }]
+keywords = ["algorithm", "energy informatics", "energy storage"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+]
+
+[tool.setuptools]
+package-dir = {"efes" = "efes", "mefes" = "mefes", "efes_core" = "efes_core"}
+
+[tool.setuptools.packages.find]
+where = ["efes_core", "efes", "mefes"]

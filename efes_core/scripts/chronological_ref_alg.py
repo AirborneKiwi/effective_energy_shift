@@ -13,17 +13,15 @@ def run_chronological_algorithm(
         efficiency_direct_usage = 1.0,
         **kwargs
     ):
-    
-    if capacity <= 0:
-        return 0.0
-    
-    energy_additional = 0.0
-    charge_initial = capacity * np.random.random()
-    # initialise
+    # initialize
     N_timesteps = len(power_generation)
+    energy_additional_over_time = np.zeros(N_timesteps)
+    if capacity <= 0:
+        return energy_additional_over_time
+
     charge = charge_initial
     charge_prev = np.full(N_timesteps, -1, dtype='float')  # sentinel
-    energy_additional_prev = np.zeros(N_timesteps)
+
     
     k = 0 
     i = 0
@@ -39,29 +37,29 @@ def run_chronological_algorithm(
         if power_residual > 0:  # surplus (charging)
             delta = min( power_residual * delta_time_step, power_max_charging * delta_time_step, (capacity - charge)/efficiency_charging )
             charge = charge + efficiency_charging * delta
-            energy_additional_prev[k] = 0
+            energy_additional_over_time[k] = 0
         else:  # deficit (discharging)
             delta = min( -power_residual * delta_time_step, power_max_discharging * delta_time_step, charge * efficiency_discharging )
             charge = charge - delta  / efficiency_discharging
-            energy_additional_prev[k] = delta
+            energy_additional_over_time[k] = delta
     
         k = (k + 1) % N_timesteps
         i = i + 1
-    
-    energy_additional = sum(energy_additional_prev)
-    return energy_additional
+
+    return energy_additional_over_time
 
 
-def query_capacities(capacities, **kwargs):
+def query_capacities(capacity_target, **kwargs):
     import pandas as pd
 
-    df = pd.DataFrame(data={'capacity': capacities, 'energy_additional_chrono': [None]*len(capacities)})
+    df = pd.DataFrame(data={'capacity': capacity_target, 'energy_additional_chrono': [None]*len(capacity_target)})
 
     def calc_energy_additional(s):
-        return run_chronological_algorithm(
+        energy_additional_over_time = run_chronological_algorithm(
             capacity=s['capacity'],
             **kwargs
         )
+        return sum(energy_additional_over_time)
     df['energy_additional_chrono'] = df.apply(calc_energy_additional, axis=1)
     return df
         
