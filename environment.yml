@@ -12,6 +12,5 @@ dependencies:
   - conda-forge::numpy
   - conda-forge::pyarrow
   - conda-forge::pandas
-  - pip:
-    - jupyterlab_latex
+  - jupyterlab-latex
   
