@@ -277,25 +277,25 @@ def calculate_additional_energy(capacity, effectiveness_local, efficiency_discha
     return energy_additional
 
 
-def run_dimensioning_query_for_target_self_sufficiency(analysis_results, self_sufficiency_target):
+def run_dimensioning_query_for_target_self_sufficiency(analysis_results, self_sufficiency_target) -> QueryResults:
     return run_query(
         analysis_results=analysis_results,
         query_results=QueryResults(query_input=QueryInput(self_sufficiency_target=self_sufficiency_target)),
     )
 
-def run_dimensioning_query_for_target_self_consumption(analysis_results, self_consumption_target):
+def run_dimensioning_query_for_target_self_consumption(analysis_results, self_consumption_target) -> QueryResults:
     return run_query(
         analysis_results=analysis_results,
         query_results=QueryResults(query_input=QueryInput(self_consumption_target=self_consumption_target)),
     )
 
-def run_dimensioning_query_for_target_additional_energy(analysis_results, energy_additional_target):
+def run_dimensioning_query_for_target_additional_energy(analysis_results, energy_additional_target) -> QueryResults:
     return run_query(
         analysis_results=analysis_results,
         query_results=QueryResults(query_input=QueryInput(energy_additional_target=energy_additional_target)),
     )
 
-def run_dimensioning_query_for_target_capacity(analysis_results, capacity_target):
+def run_dimensioning_query_for_target_capacity(analysis_results, capacity_target) -> QueryResults:
     return run_query(
         analysis_results=analysis_results,
         query_results=QueryResults(query_input=QueryInput(capacity_target=capacity_target)),
